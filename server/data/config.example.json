@@ -1,0 +1,45 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "mode": "debug"
+  },
+  "database": {
+    "driver": "sqlite",
+    "dsn": "data/oauth2.db"
+  },
+  "jwt": {
+    "secret": "自动生成的随机密钥",
+    "access_token_ttl_minutes": 15,
+    "refresh_token_ttl_days": 7,
+    "issuer": "my-oauth2"
+  },
+  "oauth": {
+    "auth_code_ttl_minutes": 10,
+    "access_token_ttl_hours": 1,
+    "refresh_token_ttl_days": 30,
+    "frontend_url": ""
+  },
+  "email": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "username": "your-email@example.com",
+    "password": "your-password",
+    "from": "noreply@example.com",
+    "from_name": "OAuth2 Service",
+    "use_tls": true
+  },
+  "social": {
+    "enabled": false,
+    "github": {
+      "enabled": false,
+      "client_id": "",
+      "client_secret": ""
+    },
+    "google": {
+      "enabled": false,
+      "client_id": "",
+      "client_secret": ""
+    }
+  }
+}

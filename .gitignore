@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build outputs
+.next/
+out/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Server runtime data (config.json contains JWT secret, db files)
+server/data/config.json
+server/data/*.db
+server/data/*.db-shm
+server/data/*.db-wal
+
+# Logs
+*.log
+logs/
+
+# Server binary
+server/server
+server/tmp/
+
+# Sensitive / secret files
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Web build
+web/.next/
+web/out/
+web/node_modules/
+
+# Client examples
+clinet/examples/*/tmp/
