@@ -88,7 +88,24 @@ My-OAuth2/
 # → http://localhost:8080（API + 前端）
 ```
 
-### 方式二：开发模式
+### 方式二：Docker 部署
+
+```bash
+# 默认模式（SQLite）
+docker compose up -d
+# → http://localhost:8080
+
+# PostgreSQL 模式
+docker compose --profile postgres up -d
+
+# MySQL 模式
+docker compose --profile mysql up -d
+
+# 自定义管理员账号
+ADMIN_EMAIL=admin@yoursite.com ADMIN_PASSWORD=StrongPass123! docker compose up -d
+```
+
+### 方式三：开发模式
 
 ```bash
 # 后端

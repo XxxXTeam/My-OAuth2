@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 /*
  * RateLimiter 基于令牌桶的限流器
  * 功能：按 IP 限制请求速率，支持突发容量，自动清理过期记录
+ * 支持优雅关停：通过 Stop() 方法停止后台清理协程
  */
 type RateLimiter struct {
 	visitors map[string]*visitor
@@ -18,6 +20,7 @@ type RateLimiter struct {
 	rate     int           // 每秒允许的请求数
 	burst    int           // 突发容量
 	cleanup  time.Duration // 清理间隔
+	stopCh   chan struct{} // 关停信号通道
 }
 
 type visitor struct {
@@ -37,24 +40,44 @@ func NewRateLimiter(rate, burst int) *RateLimiter {
 		rate:     rate,
 		burst:    burst,
 		cleanup:  time.Minute * 5,
+		stopCh:   make(chan struct{}),
 	}
 	go rl.cleanupVisitors()
 	return rl
 }
 
-/* cleanupVisitors 后台定期清理过期的访客记录 */
+/*
+ * Stop 优雅关停限流器，停止后台清理协程
+ * 调用后 cleanup goroutine 会退出，释放资源
+ */
+func (rl *RateLimiter) Stop() {
+	select {
+	case <-rl.stopCh:
+		/* 已关停，避免重复 close */
+	default:
+		close(rl.stopCh)
+	}
+}
+
+/* cleanupVisitors 后台定期清理过期的访客记录，支持通过 stopCh 优雅退出 */
 func (rl *RateLimiter) cleanupVisitors() {
+	ticker := time.NewTicker(rl.cleanup)
+	defer ticker.Stop()
 	for {
-		time.Sleep(rl.cleanup)
-		rl.mu.Lock()
-		for ip, v := range rl.visitors {
-			v.mu.Lock()
-			if time.Since(v.lastAccess) > rl.cleanup {
-				delete(rl.visitors, ip)
+		select {
+		case <-rl.stopCh:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			for ip, v := range rl.visitors {
+				v.mu.Lock()
+				if time.Since(v.lastAccess) > rl.cleanup {
+					delete(rl.visitors, ip)
+				}
+				v.mu.Unlock()
 			}
-			v.mu.Unlock()
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
 }
 
@@ -85,11 +108,21 @@ func (rl *RateLimiter) getVisitor(ip string) *visitor {
 }
 
 /*
- * Allow 检查是否允许请求（令牌桶算法）
- * @param ip   - 客户端 IP
- * @return bool - 允许返回 true
+ * RateLimitResult 限流检查结果
+ * 功能：携带剩余令牌数和限流配置，用于设置 X-RateLimit-* 响应头
  */
-func (rl *RateLimiter) Allow(ip string) bool {
+type RateLimitResult struct {
+	Allowed   bool
+	Remaining int
+	Limit     int
+}
+
+/*
+ * Check 检查是否允许请求（令牌桶算法），返回详细结果
+ * @param ip - 客户端 IP
+ * @return RateLimitResult - 包含是否允许、剩余令牌数、限流上限
+ */
+func (rl *RateLimiter) Check(ip string) RateLimitResult {
 	v := rl.getVisitor(ip)
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -107,10 +140,19 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	// 检查是否有可用令牌
 	if v.tokens >= 1 {
 		v.tokens--
-		return true
+		return RateLimitResult{Allowed: true, Remaining: int(v.tokens), Limit: rl.burst}
 	}
 
-	return false
+	return RateLimitResult{Allowed: false, Remaining: 0, Limit: rl.burst}
+}
+
+/*
+ * Allow 检查是否允许请求（令牌桶算法）
+ * @param ip   - 客户端 IP
+ * @return bool - 允许返回 true
+ */
+func (rl *RateLimiter) Allow(ip string) bool {
+	return rl.Check(ip).Allowed
 }
 
 /*
@@ -122,7 +164,14 @@ func RateLimitMiddleware(rate, burst int) gin.HandlerFunc {
 	limiter := NewRateLimiter(rate, burst)
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
-		if !limiter.Allow(ip) {
+		result := limiter.Check(ip)
+
+		/* 设置标准限流响应头 (IETF draft-ietf-httpapi-ratelimit-headers) */
+		c.Header("X-RateLimit-Limit", strconv.Itoa(result.Limit))
+		c.Header("X-RateLimit-Remaining", strconv.Itoa(result.Remaining))
+
+		if !result.Allowed {
+			c.Header("Retry-After", "1")
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"success": false,
 				"error": gin.H{

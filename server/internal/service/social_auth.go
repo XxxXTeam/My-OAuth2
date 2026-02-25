@@ -160,7 +160,8 @@ func (s *SocialAuthService) ExchangeCodeForToken(ctx context.Context, providerSl
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	/* 限制响应体大小（1MB），防止恶意提供者返回超大响应 */
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, ErrOAuthCodeExchange
 	}
@@ -218,7 +219,8 @@ func (s *SocialAuthService) GetUserInfo(ctx context.Context, providerSlug, acces
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	/* 限制响应体大小（1MB），防止恶意提供者返回超大响应 */
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, ErrOAuthUserInfo
 	}
@@ -289,7 +291,8 @@ func (s *SocialAuthService) fetchGitHubEmail(accessToken string) string {
 		Verified bool   `json:"verified"`
 	}
 
-	body, _ := io.ReadAll(resp.Body)
+	/* 限制响应体大小（1MB） */
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	json.Unmarshal(body, &emails)
 
 	// 优先返回主邮箱

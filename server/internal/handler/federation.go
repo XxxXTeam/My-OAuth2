@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 
 	"server/internal/model"
 	"server/internal/repository"
+	"server/pkg/audit"
 	"server/pkg/jwt"
 
 	"github.com/gin-gonic/gin"
@@ -154,9 +156,9 @@ func (h *FederationHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	// 验证state
+	/* 验证 state（常量时间比较，防止时序攻击） */
 	savedState, _ := c.Cookie("fed_state")
-	if state != savedState {
+	if !hmac.Equal([]byte(state), []byte(savedState)) {
 		h.redirectWithError(c, "Invalid state parameter")
 		return
 	}
@@ -225,19 +227,26 @@ func (h *FederationHandler) Callback(c *gin.Context) {
 	setCookie(c, "fed_state", "", -1, "/", fedSecure, true, http.SameSiteLaxMode)
 	setCookie(c, "fed_return", "", -1, "/", fedSecure, true, http.SameSiteLaxMode)
 
-	// 返回HTML页面，通过postMessage或localStorage传递token
+	/*
+	 * 返回 HTML 页面，通过 localStorage 传递 token
+	 * 安全：使用 JSON 编码防止 XSS 注入（token 和 returnTo 可能包含恶意字符）
+	 */
+	safeAccessToken, _ := json.Marshal(accessToken)
+	safeRefreshToken, _ := json.Marshal(refreshToken)
+	safeReturnTo, _ := json.Marshal(returnTo)
+
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head><title>登录成功</title></head>
 <body>
 <script>
-localStorage.setItem('access_token', '%s');
-localStorage.setItem('refresh_token', '%s');
-window.location.href = '%s';
+localStorage.setItem('access_token', %s);
+localStorage.setItem('refresh_token', %s);
+window.location.href = %s;
 </script>
 <p>登录成功，正在跳转...</p>
 </body>
-</html>`, accessToken, refreshToken, returnTo)
+</html>`, safeAccessToken, safeRefreshToken, safeReturnTo)
 
 	c.Header("Content-Type", "text/html")
 	c.String(http.StatusOK, html)
@@ -257,9 +266,13 @@ func (h *FederationHandler) VerifyToken(c *gin.Context) {
 		return
 	}
 
-	// 验证API凭据
+	/* 验证 API 凭据（使用常量时间比较 API_Secret，防止时序攻击） */
 	trustedApp, err := h.providerRepo.FindTrustedAppByAPIKey(req.APIKey)
-	if err != nil || trustedApp.APISecret != req.APISecret || !trustedApp.Enabled {
+	if err != nil || !trustedApp.Enabled {
+		Unauthorized(c, "Invalid API credentials")
+		return
+	}
+	if !hmac.Equal([]byte(trustedApp.APISecret), []byte(req.APISecret)) {
 		Unauthorized(c, "Invalid API credentials")
 		return
 	}
@@ -310,8 +323,11 @@ func (h *FederationHandler) AdminListProviders(c *gin.Context) {
 	Success(c, gin.H{"providers": providers})
 }
 
-// AdminCreateProvider creates a new provider
-// POST /api/admin/federation/providers
+/*
+ * AdminCreateProvider 创建联邦提供者（管理员专用）
+ * 安全：校验必填字段、URL 格式和 slug 合法性
+ * @route POST /api/admin/federation/providers
+ */
 func (h *FederationHandler) AdminCreateProvider(c *gin.Context) {
 	var req model.FederatedProvider
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -319,18 +335,48 @@ func (h *FederationHandler) AdminCreateProvider(c *gin.Context) {
 		return
 	}
 
+	/* 必填字段校验 */
+	req.Name = strings.TrimSpace(req.Name)
+	req.Slug = strings.TrimSpace(req.Slug)
+	req.AuthURL = strings.TrimSpace(req.AuthURL)
+	req.TokenURL = strings.TrimSpace(req.TokenURL)
+	req.UserInfoURL = strings.TrimSpace(req.UserInfoURL)
+	req.ClientID = strings.TrimSpace(req.ClientID)
+
+	if req.Name == "" || req.Slug == "" || req.ClientID == "" || req.ClientSecret == "" {
+		BadRequest(c, "Name, slug, client_id and client_secret are required")
+		return
+	}
+
+	/* URL 格式校验：必须是 https:// 开头（生产环境安全要求） */
+	for _, u := range []string{req.AuthURL, req.TokenURL, req.UserInfoURL} {
+		if u == "" {
+			BadRequest(c, "auth_url, token_url, and userinfo_url are required")
+			return
+		}
+		if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+			BadRequest(c, "URLs must start with http:// or https://")
+			return
+		}
+	}
+
 	if err := h.providerRepo.CreateProvider(&req); err != nil {
 		InternalError(c, "Failed to create provider: "+err.Error())
 		return
 	}
 
+	audit.Log(audit.ActionProviderCreate, audit.ResultSuccess, getActorID(c), req.ID.String(), c.ClientIP(), "provider", req.Slug)
 	Success(c, req)
 }
 
 // AdminUpdateProvider updates a provider
 // PUT /api/admin/federation/providers/:id
 func (h *FederationHandler) AdminUpdateProvider(c *gin.Context) {
-	id, _ := uuid.Parse(c.Param("id"))
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		BadRequest(c, "Invalid provider ID")
+		return
+	}
 
 	var req model.FederatedProvider
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -339,7 +385,7 @@ func (h *FederationHandler) AdminUpdateProvider(c *gin.Context) {
 	}
 	req.ID = id
 
-	if err := h.providerRepo.UpdateProvider(&req); err != nil {
+	if err = h.providerRepo.UpdateProvider(&req); err != nil {
 		InternalError(c, "Failed to update provider")
 		return
 	}
@@ -350,13 +396,18 @@ func (h *FederationHandler) AdminUpdateProvider(c *gin.Context) {
 // AdminDeleteProvider deletes a provider
 // DELETE /api/admin/federation/providers/:id
 func (h *FederationHandler) AdminDeleteProvider(c *gin.Context) {
-	id, _ := uuid.Parse(c.Param("id"))
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		BadRequest(c, "Invalid provider ID")
+		return
+	}
 
 	if err := h.providerRepo.DeleteProvider(id); err != nil {
 		InternalError(c, "Failed to delete provider")
 		return
 	}
 
+	audit.Log(audit.ActionProviderDelete, audit.ResultSuccess, getActorID(c), id.String(), c.ClientIP())
 	Success(c, gin.H{"message": "Provider deleted"})
 }
 
@@ -390,7 +441,8 @@ func (h *FederationHandler) exchangeToken(provider *model.FederatedProvider, cod
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	/* 限制响应体大小（1MB），防止恶意提供者返回超大响应导致 OOM */
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token exchange failed: %s", string(body))
 	}
@@ -428,7 +480,8 @@ func (h *FederationHandler) fetchUserInfo(provider *model.FederatedProvider, acc
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	/* 限制响应体大小（1MB），防止恶意提供者返回超大响应 */
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("userinfo failed: %s", string(body))
 	}

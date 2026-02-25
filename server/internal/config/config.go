@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -174,8 +175,67 @@ func LoadFromFile(configPath string) *Config {
 		}
 	}
 
+	/* 环境变量覆盖：Docker/K8s 部署时通过环境变量注入敏感配置 */
+	cfg.applyEnvOverrides()
+
 	cfg.computeDurations()
 	return cfg
+}
+
+/*
+ * applyEnvOverrides 从环境变量覆盖配置（优先级高于配置文件）
+ * 支持的环境变量：
+ *   SERVER_PORT, GIN_MODE, DB_DRIVER, DB_DSN, CACHE_DRIVER, REDIS_URL,
+ *   JWT_SECRET, JWT_ISSUER, OAUTH_FRONTEND_URL,
+ *   EMAIL_HOST, EMAIL_PORT, EMAIL_USERNAME, EMAIL_PASSWORD, EMAIL_FROM
+ */
+func (cfg *Config) applyEnvOverrides() {
+	if v := os.Getenv("SERVER_PORT"); v != "" {
+		if port, err := strconv.Atoi(v); err == nil && port > 0 {
+			cfg.Server.Port = port
+		}
+	}
+	if v := os.Getenv("GIN_MODE"); v != "" {
+		cfg.Server.Mode = v
+	}
+	if v := os.Getenv("DB_DRIVER"); v != "" {
+		cfg.Database.Driver = v
+	}
+	if v := os.Getenv("DB_DSN"); v != "" {
+		cfg.Database.DSN = v
+	}
+	if v := os.Getenv("CACHE_DRIVER"); v != "" {
+		cfg.Cache.Driver = v
+	}
+	if v := os.Getenv("REDIS_URL"); v != "" {
+		cfg.Cache.RedisURL = v
+	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		cfg.JWT.Secret = v
+	}
+	if v := os.Getenv("JWT_ISSUER"); v != "" {
+		cfg.JWT.Issuer = v
+	}
+	if v := os.Getenv("OAUTH_FRONTEND_URL"); v != "" {
+		cfg.OAuth.FrontendURL = v
+	}
+	if v := os.Getenv("EMAIL_HOST"); v != "" {
+		cfg.Email.Host = v
+	}
+	if v := os.Getenv("EMAIL_PORT"); v != "" {
+		if port, err := strconv.Atoi(v); err == nil && port > 0 {
+			cfg.Email.Port = port
+		}
+	}
+	if v := os.Getenv("EMAIL_USERNAME"); v != "" {
+		cfg.Email.Username = v
+	}
+	if v := os.Getenv("EMAIL_PASSWORD"); v != "" {
+		cfg.Email.Password = v
+	}
+	if v := os.Getenv("EMAIL_FROM"); v != "" {
+		cfg.Email.From = v
+	}
 }
 
 // GenerateRandomSecret 生成随机密钥
@@ -267,13 +327,16 @@ func (c *Config) computeDurations() {
 	c.OAuth.RefreshTokenTTL = time.Duration(c.OAuth.RefreshTokenTTLDays) * 24 * time.Hour
 }
 
-// saveConfig 保存配置到文件
+/*
+ * saveConfig 保存配置到文件
+ * 安全：使用 0600 权限，仅文件所有者可读写（配置含 JWT Secret 等敏感信息）
+ */
 func saveConfig(configPath string, cfg *Config) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, data, 0644)
+	return os.WriteFile(configPath, data, 0600)
 }
 
 // Save 保存当前配置
@@ -291,8 +354,9 @@ func GetDataDir() string {
  * 功能：启动时检测必要参数，提前发现配置错误避免运行时异常
  * 返回值：错误切片（为空表示配置正常）
  */
-func (c *Config) Validate() []string {
+func (c *Config) Validate() ([]string, []string) {
 	var errs []string
+	var warns []string
 
 	/* 服务配置 */
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
@@ -358,5 +422,15 @@ func (c *Config) Validate() []string {
 		}
 	}
 
-	return errs
+	/* 生产模式安全检测（警告不阻止启动） */
+	if c.Server.Mode == "release" {
+		if len(c.JWT.Secret) < 32 {
+			warns = append(warns, "jwt.secret should be at least 32 characters in production")
+		}
+		if c.Database.Driver == "sqlite" {
+			warns = append(warns, "SQLite is not recommended for production, consider PostgreSQL or MySQL")
+		}
+	}
+
+	return errs, warns
 }

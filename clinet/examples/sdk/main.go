@@ -31,6 +31,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer client.Close()
 
 	// 设置日志级别
 	client.SetLogger(oauth2.NewDefaultLogger())

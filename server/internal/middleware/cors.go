@@ -40,9 +40,10 @@ func CORSWithConfig(allowedOrigins ...string) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-CSRF-Token, X-Trace-ID")
-			c.Header("Access-Control-Expose-Headers", "X-Trace-ID, Content-Disposition")
+			c.Header("Access-Control-Expose-Headers", "X-Trace-ID, Content-Disposition, X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After")
 			c.Header("Access-Control-Max-Age", "86400")
-			c.Header("Vary", "Origin")
+			/* Vary 需包含所有影响 CORS 响应的请求头，确保 CDN/代理正确缓存 */
+			c.Header("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
 		}
 
 		/* 预检请求直接返回 */
@@ -64,7 +65,7 @@ func CORSWithConfig(allowedOrigins ...string) gin.HandlerFunc {
  * 规则：
  *   - 空列表 = 允许所有来源（开发模式）
  *   - 精确匹配
- *   - 同主机不同端口的 localhost/127.0.0.1 始终允许（开发便利）
+ *   - 仅在 Gin 为 debug 模式时，localhost/127.0.0.1 的任意端口自动允许
  */
 func isOriginAllowed(origin string, allowedSet map[string]bool) bool {
 	/* 没有配置允许列表 → 允许所有（适用于开发环境） */
@@ -79,11 +80,16 @@ func isOriginAllowed(origin string, allowedSet map[string]bool) bool {
 		return true
 	}
 
-	/* 开发环境: localhost 和 127.0.0.1 的任意端口始终允许 */
-	if parsed, err := url.Parse(cleanOrigin); err == nil {
-		host := parsed.Hostname()
-		if host == "localhost" || host == "127.0.0.1" {
-			return true
+	/*
+	 * 仅在 debug 模式下允许 localhost/127.0.0.1 任意端口
+	 * 生产环境必须通过 allowedOrigins 显式配置
+	 */
+	if gin.Mode() == gin.DebugMode {
+		if parsed, err := url.Parse(cleanOrigin); err == nil {
+			host := parsed.Hostname()
+			if host == "localhost" || host == "127.0.0.1" {
+				return true
+			}
 		}
 	}
 

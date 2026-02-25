@@ -12,6 +12,7 @@ import (
 	gctx "server/internal/context"
 	"server/internal/model"
 	"server/internal/service"
+	"server/pkg/audit"
 
 	"github.com/gin-gonic/gin"
 )
@@ -159,6 +160,7 @@ func (h *OAuthHandler) AuthorizeSubmit(c *gin.Context) {
 
 	// Handle deny
 	if req.Consent != "allow" {
+		audit.Log(audit.ActionTokenRevoke, audit.ResultSuccess, userID.String(), req.ClientID, c.ClientIP(), "event", "authorize_denied")
 		redirectURL := h.buildRedirectURL(req.RedirectURI, map[string]string{
 			"error":             "access_denied",
 			"error_description": "User denied access",
@@ -182,7 +184,16 @@ func (h *OAuthHandler) AuthorizeSubmit(c *gin.Context) {
 		UserID:              userID,
 	})
 	if err != nil {
-		InternalError(c, err.Error())
+		/* 区分客户端错误和服务端错误，PKCE/scope/redirect 等返回 400 */
+		switch {
+		case errors.Is(err, service.ErrInvalidClient),
+			errors.Is(err, service.ErrInvalidRedirectURI),
+			errors.Is(err, service.ErrInvalidScope):
+			BadRequest(c, err.Error())
+		default:
+			/* PKCE 等自定义 errors.New 错误也归为客户端请求错误 */
+			BadRequest(c, err.Error())
+		}
 		return
 	}
 
@@ -214,6 +225,8 @@ func (h *OAuthHandler) AuthorizeSubmit(c *gin.Context) {
 		"code":  result.Code,
 		"state": result.State,
 	})
+
+	audit.Log(audit.ActionTokenIssue, audit.ResultSuccess, userID.String(), req.ClientID, c.ClientIP(), "event", "authorize_approved", "scope", req.Scope)
 
 	Success(c, gin.H{
 		"redirect_url": redirectURL,
@@ -306,6 +319,16 @@ func (h *OAuthHandler) Token(c *gin.Context) {
 		}
 	}
 
+	/* 审计日志：记录 token 签发 */
+	actorID := req.ClientID
+	if uid, ok := gctx.GetUserID(c); ok {
+		actorID = uid.String()
+	}
+	audit.Log(audit.ActionTokenIssue, audit.ResultSuccess, actorID, req.ClientID, c.ClientIP(), "grant_type", req.GrantType)
+
+	/* RFC 6749 Section 5.1: Token 响应必须包含 Cache-Control 和 Pragma 头 */
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusOK, result)
 }
 
@@ -328,18 +351,27 @@ func (h *OAuthHandler) Revoke(c *gin.Context) {
 	}
 
 	if err := h.oauthService.RevokeToken(req.Token, req.TokenTypeHint); err != nil {
+		audit.Log(audit.ActionTokenRevoke, audit.ResultFailure, "client", "unknown", c.ClientIP(), "hint", req.TokenTypeHint)
 		// Per RFC 7009, we should return 200 even if token is invalid
 		c.JSON(http.StatusOK, gin.H{})
 		return
 	}
 
+	audit.Log(audit.ActionTokenRevoke, audit.ResultSuccess, "client", "token_holder", c.ClientIP(), "hint", req.TokenTypeHint)
 	c.JSON(http.StatusOK, gin.H{})
 }
 
-// UserInfo handles the userinfo endpoint
-// GET /oauth/userinfo
+/*
+ * UserInfo OIDC UserInfo 端点 (RFC 7662)
+ * 功能：根据 access_token 的授权 scope 返回对应的用户信息
+ *   - openid: sub (必须)
+ *   - profile: name, family_name, given_name, nickname, preferred_username, picture, gender, birthdate, zoneinfo, locale, website, updated_at
+ *   - email: email, email_verified
+ *   - phone: phone_number, phone_number_verified
+ *   - address: address
+ * GET /oauth/userinfo
+ */
 func (h *OAuthHandler) UserInfo(c *gin.Context) {
-	// Get token from Authorization header
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -350,7 +382,7 @@ func (h *OAuthHandler) UserInfo(c *gin.Context) {
 	}
 
 	token := strings.TrimPrefix(authHeader, "Bearer ")
-	user, err := h.oauthService.GetUserInfo(token)
+	user, scope, err := h.oauthService.GetUserInfoWithScope(token)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":             "invalid_token",
@@ -359,57 +391,69 @@ func (h *OAuthHandler) UserInfo(c *gin.Context) {
 		return
 	}
 
-	// Build OIDC-compliant userinfo response
-	response := gin.H{
-		"sub":                user.ID.String(),
-		"email":              user.Email,
-		"email_verified":     user.EmailVerified,
-		"name":               user.GetFullName(),
-		"preferred_username": user.Username,
-		"picture":            user.Avatar,
-		"updated_at":         user.UpdatedAt.Unix(),
+	/* 解析 scope 为 set，便于快速查找 */
+	scopeSet := make(map[string]bool)
+	for _, s := range strings.Fields(scope) {
+		scopeSet[s] = true
 	}
 
-	// Add optional OIDC standard claims if present
-	if user.GivenName != "" {
-		response["given_name"] = user.GivenName
+	/* sub 是必须返回的 (openid scope) */
+	response := gin.H{
+		"sub": user.ID.String(),
 	}
-	if user.FamilyName != "" {
-		response["family_name"] = user.FamilyName
-	}
-	if user.Nickname != "" {
+
+	/* profile scope: 基本个人资料（始终返回所有标准声明，空值也返回） */
+	hasProfile := scopeSet["profile"] || scopeSet["openid"]
+	if hasProfile {
+		response["name"] = user.GetFullName()
+		response["preferred_username"] = user.Username
 		response["nickname"] = user.Nickname
-	}
-	if user.Gender != "" {
+		response["given_name"] = user.GivenName
+		response["family_name"] = user.FamilyName
+		response["picture"] = user.Avatar
 		response["gender"] = user.Gender
+		response["locale"] = user.Locale
+		response["zoneinfo"] = user.Zoneinfo
+		response["website"] = user.Website
+		response["bio"] = user.Bio
+		response["updated_at"] = user.UpdatedAt.Unix()
+		response["profile_completed"] = user.ProfileCompleted
+		if user.Birthdate != nil {
+			response["birthdate"] = user.Birthdate.Format("2006-01-02")
+		} else {
+			response["birthdate"] = ""
+		}
+		/* 扩展字段 */
+		if user.Department != "" {
+			response["department"] = user.Department
+		}
+		if user.JobTitle != "" {
+			response["job_title"] = user.JobTitle
+		}
+		if user.Company != "" {
+			response["company"] = user.Company
+		}
+		socialAccounts := user.GetSocialAccounts()
+		if len(socialAccounts) > 0 {
+			response["social_accounts"] = socialAccounts
+		}
 	}
-	if user.Birthdate != nil {
-		response["birthdate"] = user.Birthdate.Format("2006-01-02")
+
+	/* email scope */
+	if scopeSet["email"] || scopeSet["openid"] {
+		response["email"] = user.Email
+		response["email_verified"] = user.EmailVerified
 	}
-	if user.PhoneNumber != "" {
+
+	/* phone scope（始终返回声明，空值也返回） */
+	if scopeSet["phone"] {
 		response["phone_number"] = user.PhoneNumber
 		response["phone_number_verified"] = user.PhoneVerified
 	}
-	if user.Address != "" {
-		response["address"] = user.GetAddress()
-	}
-	if user.Locale != "" {
-		response["locale"] = user.Locale
-	}
-	if user.Zoneinfo != "" {
-		response["zoneinfo"] = user.Zoneinfo
-	}
-	if user.Website != "" {
-		response["website"] = user.Website
-	}
-	if user.Bio != "" {
-		response["bio"] = user.Bio
-	}
 
-	// Add social accounts if present
-	socialAccounts := user.GetSocialAccounts()
-	if len(socialAccounts) > 0 {
-		response["social_accounts"] = socialAccounts
+	/* address scope（始终返回声明，空值也返回） */
+	if scopeSet["address"] {
+		response["address"] = user.GetAddress()
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -435,10 +479,21 @@ func (h *OAuthHandler) redirectWithError(c *gin.Context, redirectURI, state, err
 	c.Redirect(http.StatusFound, h.buildRedirectURL(redirectURI, params))
 }
 
+/*
+ * buildRedirectURL 构建 OAuth2 重定向 URL
+ * 功能：将参数追加到 redirect_uri 的查询字符串中
+ * 安全：验证 URL scheme 仅允许 http/https 和自定义协议（移动端），阻止 javascript: 伪协议
+ */
 func (h *OAuthHandler) buildRedirectURL(baseURL string, params map[string]string) string {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return baseURL
+	}
+
+	/* 阻止 javascript:、data: 等危险协议的开放重定向攻击 */
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "javascript" || scheme == "data" || scheme == "vbscript" {
+		return ""
 	}
 
 	q := u.Query()
@@ -466,8 +521,9 @@ func (h *OAuthHandler) handleAuthError(c *gin.Context, redirectURI, state string
 		errorCode = "invalid_scope"
 		errorDesc = "Invalid scope"
 	default:
-		errorCode = "server_error"
-		errorDesc = "Internal server error"
+		/* PKCE / 自定义错误：直接使用错误消息作为描述 */
+		errorCode = "invalid_request"
+		errorDesc = err.Error()
 	}
 
 	h.redirectWithError(c, redirectURI, state, errorCode, errorDesc)
@@ -514,9 +570,14 @@ func (h *OAuthHandler) handleTokenError(c *gin.Context, err error) {
 		status = http.StatusInternalServerError
 	}
 
+	/* 服务端内部错误不暴露原始错误信息，防止信息泄露 */
+	desc := err.Error()
+	if status == http.StatusInternalServerError {
+		desc = "An internal error occurred"
+	}
 	c.JSON(status, gin.H{
 		"error":             errorCode,
-		"error_description": err.Error(),
+		"error_description": desc,
 	})
 }
 
@@ -544,11 +605,18 @@ func (h *OAuthHandler) Introspect(c *gin.Context) {
 
 	// 调用服务验证token
 	tokenInfo, err := h.oauthService.IntrospectToken(token, clientID, clientSecret, tokenTypeHint)
+
+	/* RFC 7662: Introspect 响应禁止缓存 */
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+
 	if err != nil {
+		audit.Log(audit.ActionTokenRevoke, audit.ResultFailure, clientID, "introspect", c.ClientIP(), "hint", tokenTypeHint, "active", "false")
 		// 根据RFC 7662，无效token返回 active: false，不是错误
 		c.JSON(http.StatusOK, gin.H{"active": false})
 		return
 	}
 
+	audit.Log(audit.ActionTokenIssue, audit.ResultSuccess, clientID, "introspect", c.ClientIP(), "hint", tokenTypeHint, "active", "true")
 	c.JSON(http.StatusOK, tokenInfo)
 }

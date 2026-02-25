@@ -42,6 +42,13 @@ class ApiClient {
   private isRefreshing = false;
   private refreshPromise: Promise<boolean> | null = null;
 
+  /*
+   * 请求去重：防止同一 mutation 请求在上一次未完成时重复发送
+   * key = method + endpoint，value = 进行中的 Promise
+   * 仅对 POST/PUT/DELETE 等写操作生效，GET 请求不去重
+   */
+  private inflightMutations = new Map<string, Promise<ApiResponse<unknown>>>();
+
   constructor() {
     if (typeof window !== 'undefined') {
       this.accessToken = localStorage.getItem('access_token');
@@ -119,6 +126,27 @@ class ApiClient {
     options: RequestInit = {},
     _isRetry = false
   ): Promise<ApiResponse<T>> {
+    /* 请求去重：mutation 请求（POST/PUT/DELETE）如果已有同 endpoint 的请求在飞行中，直接复用 */
+    const method = (options.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && !_isRetry) {
+      const dedupeKey = `${method}:${endpoint}`;
+      const inflight = this.inflightMutations.get(dedupeKey);
+      if (inflight) {
+        return inflight as Promise<ApiResponse<T>>;
+      }
+      const promise = this._doRequest<T>(endpoint, options, _isRetry);
+      this.inflightMutations.set(dedupeKey, promise as Promise<ApiResponse<unknown>>);
+      promise.finally(() => this.inflightMutations.delete(dedupeKey));
+      return promise;
+    }
+    return this._doRequest<T>(endpoint, options, _isRetry);
+  }
+
+  private async _doRequest<T>(
+    endpoint: string,
+    options: RequestInit = {},
+    _isRetry = false
+  ): Promise<ApiResponse<T>> {
     const url = `${API_BASE_URL}${endpoint}`;
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
@@ -138,12 +166,20 @@ class ApiClient {
       }
     }
 
+    /* 请求超时控制：默认 30 秒，防止请求永远挂起 */
+    const timeoutMs = 30000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
       const response = await fetch(url, {
         ...options,
         headers,
         credentials: 'include', /* 携带 Cookie（httpOnly access_token + csrf_token） */
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       const data = await response.json();
 
@@ -164,6 +200,19 @@ class ApiClient {
           }
         }
 
+        /* 限流错误：读取 Retry-After 头，附带剩余等待秒数 */
+        if (response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After');
+          const retrySeconds = retryAfter ? parseInt(retryAfter, 10) : 0;
+          const msg = retrySeconds > 0
+            ? `${error.message || 'Too many requests'} (${retrySeconds}s)`
+            : (error.message || 'Too many requests, please try again later');
+          return {
+            success: false,
+            error: { code: 'TOO_MANY_REQUESTS', message: msg, retryAfter: retrySeconds || undefined },
+          };
+        }
+
         return { success: false, error };
       }
 
@@ -178,6 +227,17 @@ class ApiClient {
         data: data as T,
       };
     } catch (error) {
+      clearTimeout(timeoutId);
+      /* 区分超时和网络错误 */
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return {
+          success: false,
+          error: {
+            code: 'REQUEST_TIMEOUT',
+            message: 'Request timed out, please try again',
+          },
+        };
+      }
       return {
         success: false,
         error: {
@@ -274,6 +334,25 @@ class ApiClient {
     return this.request<{ message: string }>('/api/user/password', {
       method: 'POST',
       body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    });
+  }
+
+  /* 删除账号 (GDPR 合规) */
+  async deleteAccount(password: string): Promise<ApiResponse<{ message: string }>> {
+    return this.request<{ message: string }>('/api/user/delete-account', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+  }
+
+  /* 密码强度实时校验 */
+  async checkPasswordStrength(password: string): Promise<ApiResponse<{
+    score: number; level: string; has_upper: boolean; has_lower: boolean;
+    has_digit: boolean; has_special: boolean; length_valid: boolean; valid: boolean; error?: string;
+  }>> {
+    return this.request('/api/auth/check-password', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
     });
   }
 
@@ -507,6 +586,13 @@ class ApiClient {
   /* 管理员：发送密码重置邮件 */
   async sendResetEmail(id: string): Promise<ApiResponse<{ message: string; token?: string }>> {
     return this.request<{ message: string; token?: string }>(`/api/admin/users/${id}/send-reset-email`, {
+      method: 'POST',
+    });
+  }
+
+  /* 管理员：解锁用户账户（重置登录失败计数和锁定状态） */
+  async unlockUser(id: string): Promise<ApiResponse<{ message: string }>> {
+    return this.request<{ message: string }>(`/api/admin/users/${id}/unlock`, {
       method: 'POST',
     });
   }

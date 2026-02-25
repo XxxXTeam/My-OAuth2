@@ -3,7 +3,9 @@ package handler
 import (
 	"strconv"
 
+	ctx "server/internal/context"
 	"server/internal/service"
+	"server/pkg/audit"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -65,6 +67,12 @@ func (h *WebhookHandler) CreateWebhook(c *gin.Context) {
 		InternalError(c, "Failed to create webhook")
 		return
 	}
+
+	actorID := "unknown"
+	if uid, ok := ctx.GetUserID(c); ok {
+		actorID = uid.String()
+	}
+	audit.Log(audit.ActionAppCreate, audit.ResultSuccess, actorID, webhook.ID.String(), c.ClientIP(), "type", "webhook", "app_id", appID.String())
 
 	// Don't return the secret
 	webhook.Secret = ""
@@ -135,6 +143,12 @@ func (h *WebhookHandler) DeleteWebhook(c *gin.Context) {
 		InternalError(c, "Failed to delete webhook")
 		return
 	}
+
+	actorIDDel := "unknown"
+	if uid, ok := ctx.GetUserID(c); ok {
+		actorIDDel = uid.String()
+	}
+	audit.Log(audit.ActionAppDelete, audit.ResultSuccess, actorIDDel, webhookID.String(), c.ClientIP(), "type", "webhook")
 
 	Success(c, gin.H{"message": "Webhook deleted successfully"})
 }

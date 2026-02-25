@@ -10,7 +10,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Loader2, Lock, Shield, AlertCircle, ArrowLeft, CheckCircle } from 'lucide-react';
+import { Loader2, Lock, Shield, AlertCircle, ArrowLeft, CheckCircle, Eye, EyeOff } from 'lucide-react';
+import { PasswordStrength } from '@/components/ui/password-strength';
 
 function ResetPasswordForm() {
   const router = useRouter();
@@ -21,6 +22,8 @@ function ResetPasswordForm() {
   
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -200,16 +203,27 @@ function ResetPasswordForm() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   id="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  className="pl-10 pr-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="new-password"
                   required
                   minLength={8}
                   disabled={isLoading}
                 />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
               </div>
+              <PasswordStrength password={password} />
               <p className="text-xs text-muted-foreground">{t('passwordReset.minLength')}</p>
             </div>
             <div className="space-y-2">
@@ -218,14 +232,24 @@ function ResetPasswordForm() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   id="confirmPassword"
-                  type="password"
+                  type={showConfirmPassword ? 'text' : 'password'}
                   placeholder="••••••••"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  className="pl-10 pr-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="new-password"
                   required
                   disabled={isLoading}
                 />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                  aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
               </div>
             </div>
           </CardContent>

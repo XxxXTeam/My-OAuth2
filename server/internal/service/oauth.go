@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -106,6 +107,26 @@ func (s *OAuthService) Authorize(input *AuthorizeInput) (*AuthorizeResult, error
 	// Validate redirect URI
 	if !app.ValidateRedirectURI(input.RedirectURI) {
 		return nil, ErrInvalidRedirectURI
+	}
+
+	/*
+	 * PKCE 强制策略 (RFC 7636)：
+	 *   - 公开客户端（SPA/移动端）必须使用 PKCE
+	 *   - 机密客户端推荐但不强制
+	 *   - code_challenge_method 仅接受 S256（禁用 plain）
+	 */
+	if app.AppType == model.AppTypePublic {
+		if input.CodeChallenge == "" {
+			return nil, errors.New("PKCE code_challenge is required for public clients")
+		}
+	}
+	if input.CodeChallenge != "" {
+		if input.CodeChallengeMethod == "" {
+			input.CodeChallengeMethod = "S256"
+		}
+		if input.CodeChallengeMethod != "S256" {
+			return nil, errors.New("only S256 code_challenge_method is supported")
+		}
 	}
 
 	// Create authorization code
@@ -221,9 +242,18 @@ func (s *OAuthService) exchangeAuthorizationCode(input *TokenInput) (*TokenResul
 		return nil, ErrInvalidClient
 	}
 
-	/* 验证客户端密钥（机密客户端必需，PKCE 流程可选） */
-	if input.ClientSecret != "" {
-		if app.ClientSecret != input.ClientSecret {
+	/*
+	 * 客户端认证策略：
+	 *   - 机密客户端（confidential/machine）必须提供有效的 client_secret
+	 *   - 公开客户端（public）不需要 client_secret，但必须使用 PKCE
+	 */
+	if app.AppType == model.AppTypeConfidential || app.AppType == model.AppTypeMachine {
+		if input.ClientSecret == "" || subtle.ConstantTimeCompare([]byte(app.ClientSecret), []byte(input.ClientSecret)) != 1 {
+			return nil, ErrInvalidClient
+		}
+	} else if input.ClientSecret != "" {
+		/* 公开客户端也提供了 secret，仍然校验 */
+		if subtle.ConstantTimeCompare([]byte(app.ClientSecret), []byte(input.ClientSecret)) != 1 {
 			return nil, ErrInvalidClient
 		}
 	}
@@ -288,7 +318,25 @@ func (s *OAuthService) refreshAccessToken(input *TokenInput) (*TokenResult, erro
 		return nil, ErrInvalidGrant
 	}
 
-	// Check if token is valid
+	/*
+	 * Refresh Token 重放检测 (Token Rotation Security)
+	 * 如果一个已被撤销的 refresh_token 再次被使用，说明可能发生了令牌泄露：
+	 *   - 攻击者和合法用户都持有同一个 refresh_token
+	 *   - 合法用户先刷新（旧 token 被撤销），攻击者再使用旧 token
+	 * 安全措施：撤销该 refresh_token 关联的所有令牌（整个 token family）
+	 */
+	if refreshToken.Revoked {
+		if refreshToken.AccessTokenID != nil {
+			if at, atErr := s.oauthRepo.FindAccessTokenByID(*refreshToken.AccessTokenID); atErr == nil {
+				/* 撤销 family：同一 client + user 的所有未过期令牌 */
+				s.oauthRepo.RevokeAccessToken(at.Token)
+				s.oauthRepo.RevokeRefreshTokenByAccessTokenID(at.ID)
+			}
+		}
+		return nil, ErrTokenRevoked
+	}
+
+	// Check if token is valid (expired check)
 	if !refreshToken.IsValid() {
 		return nil, ErrTokenRevoked
 	}
@@ -363,9 +411,14 @@ func (s *OAuthService) clientCredentials(input *TokenInput) (*TokenResult, error
 		return nil, ErrInvalidClient
 	}
 
-	// Verify client secret
-	if app.ClientSecret != input.ClientSecret {
+	/* 常量时间比较 client_secret，防止时序攻击 */
+	if subtle.ConstantTimeCompare([]byte(app.ClientSecret), []byte(input.ClientSecret)) != 1 {
 		return nil, ErrInvalidClient
+	}
+
+	/* 仅 machine / confidential 类型应用允许 client_credentials 授权 */
+	if app.AppType != model.AppTypeMachine && app.AppType != model.AppTypeConfidential {
+		return nil, ErrInvalidGrant
 	}
 
 	// Check if client_credentials grant is allowed for this application
@@ -443,6 +496,18 @@ func (s *OAuthService) deviceCodeGrant(input *TokenInput) (*TokenResult, error) 
 	if dc.ClientID != input.ClientID {
 		return nil, ErrInvalidClient
 	}
+
+	/* RFC 8628 Section 3.5: 强制执行轮询间隔，客户端过快轮询返回 slow_down */
+	now := time.Now()
+	if dc.LastPolledAt != nil {
+		interval := time.Duration(dc.Interval) * time.Second
+		if now.Sub(*dc.LastPolledAt) < interval {
+			/* 记录本次轮询时间并增加 interval（slow_down 语义） */
+			_ = s.deviceRepo.UpdateLastPolledAt(input.DeviceCode, now)
+			return nil, ErrSlowDown
+		}
+	}
+	_ = s.deviceRepo.UpdateLastPolledAt(input.DeviceCode, now)
 
 	// Check if expired
 	if dc.IsExpired() {
@@ -541,22 +606,30 @@ func (s *OAuthService) tokenExchange(input *TokenInput) (*TokenResult, error) {
 		input.SubjectTokenType = TokenTypeAccessToken // Default to access_token
 	}
 
-	// Validate client if provided
-	var app *model.Application
-	if input.ClientID != "" {
-		var err error
-		app, err = s.appRepo.FindByClientID(input.ClientID)
-		if err != nil {
+	/* 强制要求客户端认证（RFC 8693 安全要求） */
+	if input.ClientID == "" {
+		return nil, ErrInvalidClient
+	}
+	app, err := s.appRepo.FindByClientID(input.ClientID)
+	if err != nil {
+		return nil, ErrInvalidClient
+	}
+
+	/* 机密客户端 / 机器客户端必须提供有效 secret */
+	if app.AppType == model.AppTypeConfidential || app.AppType == model.AppTypeMachine {
+		if input.ClientSecret == "" || subtle.ConstantTimeCompare([]byte(app.ClientSecret), []byte(input.ClientSecret)) != 1 {
 			return nil, ErrInvalidClient
 		}
-		// Verify client secret if provided
-		if input.ClientSecret != "" && app.ClientSecret != input.ClientSecret {
+	} else if input.ClientSecret != "" {
+		/* 公开客户端提供了 secret，也需要校验 */
+		if subtle.ConstantTimeCompare([]byte(app.ClientSecret), []byte(input.ClientSecret)) != 1 {
 			return nil, ErrInvalidClient
 		}
-		// Check if token-exchange grant is allowed
-		if !app.SupportsGrantType("urn:ietf:params:oauth:grant-type:token-exchange") && !app.SupportsGrantType("token-exchange") && !app.SupportsGrantType("token_exchange") {
-			return nil, ErrInvalidGrant
-		}
+	}
+
+	/* 检查 token-exchange 授权类型是否允许 */
+	if !app.SupportsGrantType("urn:ietf:params:oauth:grant-type:token-exchange") && !app.SupportsGrantType("token-exchange") && !app.SupportsGrantType("token_exchange") {
+		return nil, ErrInvalidGrant
 	}
 
 	// Validate subject token based on type
@@ -750,7 +823,25 @@ func (s *OAuthService) RevokeToken(token, tokenTypeHint string) error {
 }
 
 /*
- * GetUserInfo 获取访问令牌关联的用户信息 (OIDC UserInfo 端点)
+ * GetUserInfoWithScope 获取访问令牌关联的用户信息及授权 scope (OIDC UserInfo 端点)
+ * @param token - 访问令牌字符串
+ * @return *model.User  - 用户实体
+ * @return string       - 令牌授权的 scope
+ */
+func (s *OAuthService) GetUserInfoWithScope(token string) (*model.User, string, error) {
+	user, accessToken, err := s.ValidateAccessToken(token)
+	if err != nil {
+		return nil, "", err
+	}
+	scope := ""
+	if accessToken != nil {
+		scope = accessToken.Scope
+	}
+	return user, scope, nil
+}
+
+/*
+ * GetUserInfo 获取访问令牌关联的用户信息 (OIDC UserInfo 端点，向后兼容)
  * @param token - 访问令牌字符串
  * @return *model.User - 用户实体
  */
@@ -771,14 +862,22 @@ func (s *OAuthService) validateCodeVerifier(verifier, challenge, method string) 
 		return false
 	}
 
+	/*
+	 * RFC 7636 §4.1: code_verifier 长度必须在 43-128 字符之间
+	 * 过短的 verifier 安全熵不足，过长的超出规范
+	 */
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+
 	switch method {
 	case "S256":
 		hash := sha256.Sum256([]byte(verifier))
 		computed := base64.RawURLEncoding.EncodeToString(hash[:])
-		return computed == challenge
-	case "plain", "":
-		return verifier == challenge
+		/* 使用常量时间比较防止时序攻击 */
+		return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 	default:
+		/* 仅支持 S256，拒绝 plain 和其他方法（符合 OAuth 2.1 草案要求） */
 		return false
 	}
 }
@@ -813,12 +912,25 @@ func ParseScope(scope string) []string {
  * @return map[string]interface{} - 令牌元数据（active, scope, sub 等）
  */
 func (s *OAuthService) IntrospectToken(token, clientID, clientSecret, tokenTypeHint string) (map[string]interface{}, error) {
-	// 可选：验证客户端凭据
-	if clientID != "" && clientSecret != "" {
-		app, err := s.appRepo.FindByClientID(clientID)
-		if err != nil || app.ClientSecret != clientSecret {
+	/*
+	 * RFC 7662 安全增强：强制要求客户端认证
+	 * introspection 端点返回敏感信息（用户 ID、scope 等），必须验证调用者身份
+	 * 拒绝无认证的请求，防止未授权方探测 token 状态
+	 */
+	if clientID == "" {
+		return nil, ErrInvalidClient
+	}
+	app, err := s.appRepo.FindByClientID(clientID)
+	if err != nil {
+		return nil, ErrInvalidClient
+	}
+	/* 机密客户端必须提供有效 secret */
+	if app.AppType == model.AppTypeConfidential || app.AppType == model.AppTypeMachine {
+		if clientSecret == "" || app.ClientSecret != clientSecret {
 			return nil, ErrInvalidClient
 		}
+	} else if clientSecret != "" && app.ClientSecret != clientSecret {
+		return nil, ErrInvalidClient
 	}
 
 	// 尝试验证为access_token

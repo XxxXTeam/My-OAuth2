@@ -13,20 +13,57 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 /* SDK 错误定义 */
 var (
-	ErrNoToken      = errors.New("oauth2: no token available")
-	ErrTokenExpired = errors.New("oauth2: token expired")
-	ErrInvalidState = errors.New("oauth2: invalid state parameter")
-	ErrInvalidGrant = errors.New("oauth2: invalid grant")
-	ErrServerError  = errors.New("oauth2: server error")
+	ErrNoToken             = errors.New("oauth2: no token available")
+	ErrTokenExpired        = errors.New("oauth2: token expired")
+	ErrInvalidState        = errors.New("oauth2: invalid state parameter")
+	ErrInvalidGrant        = errors.New("oauth2: invalid grant")
+	ErrServerError         = errors.New("oauth2: server error")
+	ErrNetworkError        = errors.New("oauth2: network error")
+	ErrRateLimited         = errors.New("oauth2: rate limited")
+	ErrInvalidClient       = errors.New("oauth2: invalid client credentials")
+	ErrInvalidScope        = errors.New("oauth2: invalid scope")
+	ErrAccessDenied        = errors.New("oauth2: access denied")
+	ErrMaxRetriesExhausted = errors.New("oauth2: max retries exhausted")
 )
+
+/*
+ * OAuthError 结构化 OAuth2 错误，携带服务端返回的详细信息
+ * 功能：将服务端 error / error_description 封装为可判断的错误类型
+ */
+type OAuthError struct {
+	Code        string /* OAuth2 错误码，如 invalid_grant, invalid_client */
+	Description string /* 服务端返回的可读错误描述 */
+	StatusCode  int    /* HTTP 状态码 */
+}
+
+func (e *OAuthError) Error() string {
+	if e.Description != "" {
+		return fmt.Sprintf("oauth2: %s - %s (HTTP %d)", e.Code, e.Description, e.StatusCode)
+	}
+	return fmt.Sprintf("oauth2: %s (HTTP %d)", e.Code, e.StatusCode)
+}
+
+/*
+ * IsOAuthError 判断 err 是否为 OAuthError，并提取其值
+ * 用法：if oauthErr, ok := oauth2.IsOAuthError(err); ok { ... }
+ */
+func IsOAuthError(err error) (*OAuthError, bool) {
+	var oauthErr *OAuthError
+	if errors.As(err, &oauthErr) {
+		return oauthErr, true
+	}
+	return nil, false
+}
 
 /*
  * Client OAuth2 客户端
@@ -42,31 +79,101 @@ type Client struct {
 	// State management for authorization flow
 	stateMu sync.RWMutex
 	states  map[string]*authState
+	stopCh  chan struct{}
 }
 
 /* authState 授权请求的状态信息（PKCE + 创建时间） */
 type authState struct {
 	pkce      *PKCE
-	createdAt int64
+	createdAt time.Time
 }
+
+/* stateMaxAge auth state 最大存活时间（10 分钟），超过后自动清理防止内存泄漏 */
+const stateMaxAge = 10 * time.Minute
 
 /*
  * NewClient 创建新的 OAuth2 客户端实例
  * @param config - 客户端配置（包含服务器地址、client_id、client_secret 等）
  * @return *Client - 客户端实例
+ * 自动配置 HTTP 客户端超时和连接池参数
  */
 func NewClient(config *Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 
-	return &Client{
+	/* 设置默认超时 */
+	timeout := 30 * time.Second
+	if config.TimeoutSec > 0 {
+		timeout = time.Duration(config.TimeoutSec) * time.Second
+	}
+
+	/* 配置带连接池优化的 HTTP Transport */
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+
+	httpClient := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+
+	c := &Client{
 		config:     config,
-		httpClient: http.DefaultClient,
+		httpClient: httpClient,
 		tokenStore: NewMemoryTokenStore(),
 		logger:     NewDefaultLogger(),
 		states:     make(map[string]*authState),
-	}, nil
+		stopCh:     make(chan struct{}),
+	}
+
+	/* 启动后台协程清理过期的 auth state，防止内存泄漏 */
+	go c.cleanupStaleStates()
+
+	return c, nil
+}
+
+/*
+ * Close 关闭客户端，停止后台清理协程
+ * 功能：释放后台资源，应在客户端不再使用时调用
+ */
+func (c *Client) Close() {
+	select {
+	case <-c.stopCh:
+	default:
+		close(c.stopCh)
+	}
+}
+
+/*
+ * cleanupStaleStates 后台定期清理过期的 auth state
+ * 功能：每分钟扫描一次，删除超过 stateMaxAge 的 state，防止内存泄漏
+ */
+func (c *Client) cleanupStaleStates() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.stateMu.Lock()
+			now := time.Now()
+			for key, s := range c.states {
+				if now.Sub(s.createdAt) > stateMaxAge {
+					delete(c.states, key)
+				}
+			}
+			c.stateMu.Unlock()
+		}
+	}
 }
 
 /* SetLogger 设置自定义日志器 */
@@ -114,7 +221,7 @@ func (c *Client) AuthCodeURL() (string, error) {
 	}
 
 	// Store state
-	authState := &authState{}
+	authState := &authState{createdAt: time.Now()}
 
 	// Add PKCE if enabled
 	if c.config.UsePKCE {
@@ -259,7 +366,8 @@ func (c *Client) GetUserInfo(ctx context.Context) (*UserInfo, error) {
 		return nil, fmt.Errorf("oauth2: userinfo request failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	/* 限制响应体大小（5MB），防止恶意服务端返回超大响应 */
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -272,9 +380,156 @@ func (c *Client) GetUserInfo(ctx context.Context) (*UserInfo, error) {
 	return &userInfo, nil
 }
 
-// Logout clears the stored token
-func (c *Client) Logout() error {
+/*
+ * RevokeToken 撤销令牌 (RFC 7009)
+ * 功能：向服务端 revoke 端点发送撤销请求，同时清除本地存储
+ * @param ctx           - 上下文
+ * @param tokenTypeHint - 令牌类型提示 ("access_token" / "refresh_token"，可为空)
+ */
+func (c *Client) RevokeToken(ctx context.Context, tokenTypeHint string) error {
+	token, err := c.tokenStore.GetToken()
+	if err != nil || token == nil {
+		return c.tokenStore.DeleteToken()
+	}
+
+	/* 确定要撤销的令牌值 */
+	revokeToken := token.AccessToken
+	if tokenTypeHint == "refresh_token" && token.RefreshToken != "" {
+		revokeToken = token.RefreshToken
+	}
+
+	/* 推导 revoke URL：将 TokenURL 的 /token 路径替换为 /revoke */
+	revokeURL := strings.Replace(c.config.TokenURL, "/token", "/revoke", 1)
+
+	data := url.Values{}
+	data.Set("token", revokeToken)
+	if tokenTypeHint != "" {
+		data.Set("token_type_hint", tokenTypeHint)
+	}
+	data.Set("client_id", c.config.ClientID)
+	if c.config.ClientSecret != "" {
+		data.Set("client_secret", c.config.ClientSecret)
+	}
+
+	req, reqErr := http.NewRequestWithContext(ctx, "POST", revokeURL, strings.NewReader(data.Encode()))
+	if reqErr != nil {
+		return reqErr
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, doErr := c.httpClient.Do(req)
+	if doErr != nil {
+		return doErr
+	}
+	resp.Body.Close()
+
+	c.logger.Debug("Token revoked successfully")
+
+	/* 清除本地存储 */
 	return c.tokenStore.DeleteToken()
+}
+
+/*
+ * IntrospectToken 令牌自省 (RFC 7662)
+ * 功能：查询令牌的元数据（是否有效、scope、过期时间等）
+ * @param ctx           - 上下文
+ * @param token         - 要查询的令牌字符串
+ * @param tokenTypeHint - 令牌类型提示（可为空）
+ * @return map[string]interface{} - 自省结果
+ */
+func (c *Client) IntrospectToken(ctx context.Context, token string, tokenTypeHint string) (map[string]interface{}, error) {
+	/* 推导 introspect URL */
+	introspectURL := strings.Replace(c.config.TokenURL, "/token", "/introspect", 1)
+
+	data := url.Values{}
+	data.Set("token", token)
+	if tokenTypeHint != "" {
+		data.Set("token_type_hint", tokenTypeHint)
+	}
+	data.Set("client_id", c.config.ClientID)
+	if c.config.ClientSecret != "" {
+		data.Set("client_secret", c.config.ClientSecret)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", introspectURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+/*
+ * Logout 登出并清除本地 Token
+ * 功能：可选地先向服务端撤销 access_token 和 refresh_token，再清除本地存储
+ * @param revokeRemote - 是否同时撤销服务端令牌（推荐生产环境开启）
+ */
+func (c *Client) Logout(revokeRemote ...bool) error {
+	if len(revokeRemote) > 0 && revokeRemote[0] {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		/* 优先撤销 refresh_token（会级联失效关联的 access_token） */
+		if err := c.RevokeToken(ctx, "refresh_token"); err != nil {
+			c.logger.Debug("Failed to revoke refresh token: %v", err)
+			/* 回退：尝试撤销 access_token */
+			_ = c.RevokeToken(ctx, "access_token")
+		}
+		/* RevokeToken 已清除本地存储，直接返回 */
+		return nil
+	}
+	return c.tokenStore.DeleteToken()
+}
+
+/*
+ * TokenValid 检查当前 token 是否有效（未过期且存在）
+ * @return bool - token 有效返回 true
+ */
+func (c *Client) TokenValid() bool {
+	token, err := c.tokenStore.GetToken()
+	if err != nil || token == nil {
+		return false
+	}
+	return !token.IsExpired()
+}
+
+/*
+ * EnsureToken 确保有有效的 token，过期时自动刷新
+ * @param ctx - 上下文
+ * @return *Token - 有效的 token
+ */
+func (c *Client) EnsureToken(ctx context.Context) (*Token, error) {
+	token, err := c.tokenStore.GetToken()
+	if err != nil {
+		return nil, err
+	}
+	if token == nil {
+		return nil, ErrNoToken
+	}
+	if !token.IsExpired() {
+		return token, nil
+	}
+	/* token 已过期，尝试刷新 */
+	if token.RefreshToken != "" {
+		return c.RefreshToken(ctx)
+	}
+	return nil, ErrTokenExpired
 }
 
 // RefreshToken refreshes the access token using the refresh token
@@ -314,37 +569,89 @@ func (c *Client) RefreshToken(ctx context.Context) (*Token, error) {
 	return newToken, nil
 }
 
-// doTokenRequest makes a token request to the token endpoint
+/*
+ * doTokenRequest 向 Token 端点发送请求
+ * 功能：带指数退避重试机制，仅对 5xx 和网络错误重试
+ */
 func (c *Client) doTokenRequest(ctx context.Context, data url.Values) (*Token, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", c.config.TokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, err
+	maxRetries := 3
+	if c.config.MaxRetries > 0 {
+		maxRetries = c.config.MaxRetries
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	retryDelay := 500 * time.Millisecond
+	if c.config.RetryDelay > 0 {
+		retryDelay = time.Duration(c.config.RetryDelay) * time.Millisecond
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Error       string `json:"error"`
-			Description string `json:"error_description"`
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			/* 指数退避等待 */
+			backoff := retryDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			c.logger.Debug(fmt.Sprintf("Retrying token request (attempt %d/%d)", attempt, maxRetries))
 		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("oauth2: %s - %s", errResp.Error, errResp.Description)
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.config.TokenURL, strings.NewReader(data.Encode()))
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("oauth2: token request failed with status %d", resp.StatusCode)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			/* 网络错误可重试 */
+			continue
+		}
+
+		/* 限制响应体大小（5MB） */
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		/* 5xx 服务端错误可重试 */
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("oauth2: token request failed with status %d", resp.StatusCode)
+			continue
+		}
+
+		/* 429 限流错误可重试 */
+		if resp.StatusCode == http.StatusTooManyRequests {
+			lastErr = ErrRateLimited
+			continue
+		}
+
+		/* 4xx 客户端错误不重试，返回结构化错误 */
+		if resp.StatusCode != http.StatusOK {
+			var errResp struct {
+				Error       string `json:"error"`
+				Description string `json:"error_description"`
+			}
+			if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+				return nil, &OAuthError{
+					Code:        errResp.Error,
+					Description: errResp.Description,
+					StatusCode:  resp.StatusCode,
+				}
+			}
+			return nil, &OAuthError{
+				Code:       "unknown_error",
+				StatusCode: resp.StatusCode,
+			}
+		}
+
+		return parseTokenResponse(body)
 	}
 
-	return parseTokenResponse(body)
+	return nil, fmt.Errorf("oauth2: token request failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // UserInfo represents user information from the userinfo endpoint (OIDC compliant)
@@ -443,7 +750,7 @@ func (c *Client) RegisterUser(ctx context.Context, req *SDKRegisterRequest) (*SD
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +815,7 @@ func (c *Client) LoginUser(ctx context.Context, req *SDKLoginRequest) (*SDKToken
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -592,7 +899,7 @@ func (c *Client) SignToken(ctx context.Context, req *SignTokenRequest) (*SignTok
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +1014,7 @@ func (c *Client) ValidateUserToken(ctx context.Context, token string) (*UserInfo
 		return nil, fmt.Errorf("oauth2: validate token failed with status %d", resp.StatusCode)
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -723,6 +1030,39 @@ func (c *Client) ValidateUserToken(ctx context.Context, token string) (*UserInfo
 // GetAPIBaseURL returns the API base URL from config
 func (c *Client) GetAPIBaseURL() string {
 	return strings.TrimSuffix(c.config.AuthURL, "/oauth/authorize")
+}
+
+/*
+ * HealthCheck 检查 OAuth2 服务端连通性和健康状态
+ * 功能：向 /health 端点发送 GET 请求，返回服务端健康信息
+ * @param ctx - 上下文（可用于超时控制）
+ * @return map[string]interface{} - 健康检查结果（status, database, cache 等）
+ */
+func (c *Client) HealthCheck(ctx context.Context) (map[string]interface{}, error) {
+	healthURL := c.GetAPIBaseURL() + "/health"
+
+	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("oauth2: failed to create health check request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("oauth2: health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("oauth2: failed to read health check response: %w", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("oauth2: failed to parse health check response: %w", err)
+	}
+
+	return result, nil
 }
 
 // ========== 用户同步 API ==========
@@ -808,7 +1148,7 @@ func (c *Client) SyncUser(ctx context.Context, req *SyncUserRequest) (*SyncUserR
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		var errResp struct {
@@ -867,7 +1207,7 @@ func (c *Client) BatchSyncUsers(ctx context.Context, users []SyncUserRequest) (*
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp struct {
@@ -914,7 +1254,7 @@ func (c *Client) GetUserByEmail(ctx context.Context, email string) (*UserInfo, e
 		return nil, nil // 用户不存在
 	}
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("get user failed with status %d", resp.StatusCode)

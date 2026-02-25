@@ -9,6 +9,7 @@ import (
 	"server/internal/repository"
 	"server/internal/service"
 	"server/pkg/jwt"
+	"server/pkg/sanitize"
 
 	"github.com/gin-gonic/gin"
 )
@@ -88,6 +89,15 @@ func (h *SDKHandler) Register(c *gin.Context) {
 	app, err := h.appRepo.ValidateCredentials(req.ClientID, req.ClientSecret)
 	if err != nil {
 		Unauthorized(c, "Invalid client credentials")
+		return
+	}
+
+	/* 输入清洗 */
+	req.Email = sanitize.Email(req.Email)
+	if u, ok := sanitize.Username(req.Username); ok {
+		req.Username = u
+	} else {
+		BadRequest(c, "Invalid username format")
 		return
 	}
 

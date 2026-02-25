@@ -5,6 +5,8 @@
 package jwt
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -86,7 +88,7 @@ func (m *Manager) GenerateToken(userID uuid.UUID, email, username, role string, 
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 			NotBefore: jwt.NewNumericDate(now),
-			ID:        uuid.New().String(),
+			ID:        generateSecureJTI(),
 		},
 	}
 
@@ -94,14 +96,20 @@ func (m *Manager) GenerateToken(userID uuid.UUID, email, username, role string, 
 	return token.SignedString(m.secretKey)
 }
 
-/* ValidateToken 验证 JWT token 并返回 claims（不校验 token 类型） */
+/*
+ * ValidateToken 验证 JWT token 并返回 claims（不校验 token 类型）
+ * 安全增强：
+ *   - 强制校验签名算法为 HMAC，防止 alg=none 攻击
+ *   - 校验 issuer 一致性，防止跨服务 token 混用
+ */
 func (m *Manager) ValidateToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		/* 强制校验签名算法，阻止 alg:none / alg:RS256 等算法混淆攻击 */
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
 		}
 		return m.secretKey, nil
-	})
+	}, jwt.WithIssuer(m.issuer), jwt.WithValidMethods([]string{"HS256"}))
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
@@ -140,4 +148,16 @@ func (m *Manager) ValidateRefreshToken(tokenString string) (*Claims, error) {
 		return nil, ErrTokenTypeMismatch
 	}
 	return claims, nil
+}
+
+/*
+ * generateSecureJTI 使用 crypto/rand 生成安全的 JWT ID
+ * 功能：16 字节随机数 → 32 字符十六进制字符串，比 uuid.New() 的 PRNG 更适合安全场景
+ */
+func generateSecureJTI() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return uuid.New().String()
+	}
+	return hex.EncodeToString(b)
 }

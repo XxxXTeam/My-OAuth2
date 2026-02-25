@@ -59,5 +59,8 @@ web/.next/
 web/out/
 web/node_modules/
 
+# Docker
+docker-data/
+
 # Client examples
 clinet/examples/*/tmp/

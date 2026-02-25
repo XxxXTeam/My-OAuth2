@@ -31,7 +31,11 @@ func SetBuildInfo(id string) {
 	}
 }
 
-func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
+/*
+ * Setup 初始化路由和所有依赖，返回 gin.Engine 和 cleanup 函数
+ * cleanup 函数在优雅关停时调用，停止邮件队列等后台服务
+ */
+func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, func()) {
 	// Set gin mode
 	gin.SetMode(cfg.Server.Mode)
 
@@ -45,6 +49,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 	r.Use(middleware.TraceID())
 	r.Use(middleware.RecoveryWithLogger())
 	r.Use(middleware.SecurityHeaders())
+	r.Use(middleware.GzipCompression()) /* Gzip 响应压缩 */
 	r.Use(middleware.RequestSizeLimit(10 << 20))
 	r.Use(middleware.RequestLogger())
 	r.Use(middleware.Timeout(30 * time.Second))             /* 请求超时 30 秒 */
@@ -53,6 +58,8 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 	// Initialize dependencies
 	db := database.GetDB()
 	jwtManager := jwt.NewManager(cfg.JWT.Secret, cfg.JWT.Issuer)
+	/* JWT 黑名单：基于缓存实现 token 即时吊销（登出/密码变更） */
+	tokenBlacklist := jwt.NewBlacklist(cacheInstance)
 
 	// Repositories
 	userRepo := repository.NewUserRepository(db)
@@ -71,7 +78,8 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 
 	// Services
 	authService := service.NewAuthService(userRepo, loginLogRepo, jwtManager, cfg)
-	authService.SetOAuthRepo(oauthRepo) // 启用 refresh token 轮换
+	authService.SetOAuthRepo(oauthRepo)           // 启用 refresh token 轮换
+	authService.SetTokenBlacklist(tokenBlacklist) // 启用 access token 即时吊销
 	appService := service.NewApplicationService(appRepo)
 	oauthService := service.NewOAuthService(appRepo, oauthRepo, userRepo, userAuthRepo, cfg)
 	oauthService.SetDeviceCodeRepository(deviceCodeRepo) // Enable device flow
@@ -141,6 +149,11 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 	emailQueueService := service.NewEmailQueueService(emailTaskRepo, emailService, logger.Default())
 	emailQueueService.Start()
 
+	/* cleanup 函数：优雅关停时调用，停止邮件队列 worker */
+	cleanupFn := func() {
+		emailQueueService.Stop()
+	}
+
 	// 注入邮件队列到各服务（无论是否配置 SMTP，队列始终可用，任务会等待配置完成后发送）
 	passwordResetService.SetOAuthRepo(oauthRepo)
 	passwordResetService.SetEmailQueue(emailQueueService, frontendURL)
@@ -162,6 +175,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 		{
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
+			auth.POST("/check-password", authHandler.CheckPasswordStrength)
 			auth.POST("/refresh", authHandler.Refresh)
 			auth.POST("/logout", authHandler.Logout)
 			auth.POST("/forgot-password", passwordResetHandler.ForgotPassword)
@@ -188,6 +202,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 	r.GET("/.well-known/jwks.json", oidcHandler.JWKS)
 	r.GET("/.well-known/webfinger", oidcHandler.WebFinger)
 	oauth := r.Group("/oauth")
+	oauth.Use(middleware.AuthRateLimiter()) /* OAuth 端点限流：防止暴力破解 token/introspect */
 	{
 		oauth.POST("/token", oauthHandler.Token)
 		oauth.POST("/revoke", oauthHandler.Revoke)
@@ -210,7 +225,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 
 	// OAuth2 authorize submission (requires auth)
 	oauthAPIAuth := r.Group("/api/oauth")
-	oauthAPIAuth.Use(middleware.Auth(jwtManager))
+	oauthAPIAuth.Use(middleware.Auth(jwtManager, tokenBlacklist))
 	{
 		oauthAPIAuth.POST("/authorize", oauthHandler.AuthorizeSubmit)
 		// Device Flow authorization (requires auth)
@@ -219,7 +234,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 
 	// Protected routes
 	protected := r.Group("/api")
-	protected.Use(middleware.Auth(jwtManager))
+	protected.Use(middleware.Auth(jwtManager, tokenBlacklist))
 	{
 		user := protected.Group("/user")
 		{
@@ -230,6 +245,9 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 			user.POST("/authorizations/:id/revoke", userHandler.RevokeAuthorization)
 			user.POST("/avatar", avatarHandler.Upload)
 			user.POST("/avatar/delete", avatarHandler.Delete)
+
+			// 删除账号 (GDPR 合规)
+			user.POST("/delete-account", userHandler.DeleteAccount)
 
 			// 邮箱验证
 			user.POST("/email/send-verify", userHandler.SendEmailVerification)
@@ -266,7 +284,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 
 	// Admin routes (requires admin role)
 	admin := r.Group("/api/admin")
-	admin.Use(middleware.Auth(jwtManager), middleware.AdminOnly())
+	admin.Use(middleware.Auth(jwtManager, tokenBlacklist), middleware.AdminOnly())
 	{
 		admin.GET("/stats", adminHandler.GetStats)
 		admin.GET("/stats/login-trend", adminHandler.GetLoginTrend)
@@ -307,6 +325,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 		admin.POST("/users", adminHandler.CreateUser)
 		admin.POST("/users/:id/update", adminHandler.UpdateUser)
 		admin.POST("/users/:id/send-reset-email", adminHandler.SendResetEmail)
+		admin.POST("/users/:id/unlock", adminHandler.UnlockUser)
 
 		// Email management
 		admin.GET("/email/config", emailAdminHandler.GetEmailConfig)
@@ -335,7 +354,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 
 	/* 管理员联邦提供商管理路由 */
 	adminFederation := r.Group("/api/admin/federation")
-	adminFederation.Use(middleware.Auth(jwtManager), middleware.AdminOnly())
+	adminFederation.Use(middleware.Auth(jwtManager, tokenBlacklist), middleware.AdminOnly())
 	{
 		adminFederation.GET("/providers", federationHandler.AdminListProviders)
 		adminFederation.POST("/providers", federationHandler.AdminCreateProvider)
@@ -362,13 +381,13 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 	events := r.Group("/api/events")
 	{
 		events.GET("/app", sseHandler.StreamApp)
-		events.GET("/stream", middleware.Auth(jwtManager), sseHandler.Stream)
+		events.GET("/stream", middleware.Auth(jwtManager, tokenBlacklist), sseHandler.Stream)
 	}
 
 	// Avatar file serving
 	r.GET("/avatars/:filename", avatarHandler.ServeAvatar)
 
-	/* 健康检查 - 含数据库连通性、连接池状态和运行时指标 */
+	/* 健康检查 - 含数据库连通性、缓存状态、连接池指标和运行时指标 */
 	serverStartTime := time.Now()
 	r.GET("/health", func(c *gin.Context) {
 		status := "ok"
@@ -391,6 +410,24 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 			dbInfo["open_connections"] = stats.OpenConnections
 			dbInfo["in_use"] = stats.InUse
 			dbInfo["idle"] = stats.Idle
+			dbInfo["wait_count"] = stats.WaitCount
+			dbInfo["wait_duration_ms"] = stats.WaitDuration.Milliseconds()
+			dbInfo["max_idle_closed"] = stats.MaxIdleClosed
+			dbInfo["max_lifetime_closed"] = stats.MaxLifetimeClosed
+		}
+
+		/* 缓存健康检查 */
+		cacheInfo := gin.H{"status": "ok"}
+		if cacheInstance != nil {
+			testKey := "__health_check__"
+			if err := cacheInstance.Set(c.Request.Context(), testKey, []byte("1"), 5*time.Second); err != nil {
+				cacheInfo["status"] = "error: " + err.Error()
+				status = "degraded"
+			} else {
+				cacheInstance.Delete(c.Request.Context(), testKey)
+			}
+		} else {
+			cacheInfo["status"] = "not configured"
 		}
 
 		var mem runtime.MemStats
@@ -402,12 +439,15 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 		}
 
 		c.JSON(code, gin.H{
-			"status":     status,
-			"db":         dbInfo,
-			"goroutines": runtime.NumGoroutine(),
-			"memory_mb":  fmt.Sprintf("%.1f", float64(mem.Alloc)/1024/1024),
-			"uptime":     fmt.Sprintf("%s", time.Since(serverStartTime).Round(time.Second)),
-			"build_id":   buildID,
+			"status":       status,
+			"db":           dbInfo,
+			"cache":        cacheInfo,
+			"goroutines":   runtime.NumGoroutine(),
+			"memory_mb":    fmt.Sprintf("%.1f", float64(mem.Alloc)/1024/1024),
+			"gc_pause_ms":  fmt.Sprintf("%.2f", float64(mem.PauseTotalNs)/1e6),
+			"heap_objects": mem.HeapObjects,
+			"uptime":       fmt.Sprintf("%s", time.Since(serverStartTime).Round(time.Second)),
+			"build_id":     buildID,
 		})
 	})
 
@@ -415,41 +455,44 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) *gin.Engine {
 	if web.HasStaticFiles() {
 		staticHandler := handler.NewStaticHandler(web.GetFileSystem())
 
-		// Serve static assets (js, css, images, etc.)
-		r.GET("/assets/*filepath", func(c *gin.Context) {
+		/* 静态资源服务 - 带长期缓存头（含哈希的文件缓存 1 年，其他 1 小时） */
+		staticCacheMiddleware := func(maxAge string) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				c.Header("Cache-Control", "public, max-age="+maxAge+", immutable")
+				c.Next()
+			}
+		}
+		r.GET("/assets/*filepath", staticCacheMiddleware("31536000"), func(c *gin.Context) {
 			c.FileFromFS(c.Request.URL.Path, web.GetFileSystem())
 		})
-		r.GET("/_next/*filepath", func(c *gin.Context) {
+		r.GET("/_next/*filepath", staticCacheMiddleware("31536000"), func(c *gin.Context) {
 			c.FileFromFS(c.Request.URL.Path, web.GetFileSystem())
 		})
-		r.GET("/favicon.ico", func(c *gin.Context) {
+		r.GET("/favicon.ico", staticCacheMiddleware("3600"), func(c *gin.Context) {
 			c.FileFromFS("/favicon.ico", web.GetFileSystem())
 		})
 
 		// NoRoute handler for SPA routing
 		r.NoRoute(func(c *gin.Context) {
-			// Skip API routes
 			path := c.Request.URL.Path
-			if len(path) >= 4 && path[:4] == "/api" {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+			/* API 和 OAuth 路由返回统一格式的 JSON 404 错误 */
+			if (len(path) >= 4 && path[:4] == "/api") ||
+				(len(path) >= 6 && path[:6] == "/oauth" && path != "/oauth/authorize") {
+				c.JSON(http.StatusNotFound, gin.H{
+					"success": false,
+					"error": gin.H{
+						"code":    "NOT_FOUND",
+						"message": "The requested endpoint does not exist",
+					},
+				})
 				return
 			}
-			// Skip OAuth endpoints except /oauth/authorize (which is handled by SPA when embedded)
-			if len(path) >= 6 && path[:6] == "/oauth" {
-				// Allow /oauth/authorize to be handled by SPA
-				if path == "/oauth/authorize" || (len(path) > 17 && path[:17] == "/oauth/authorize?") {
-					staticHandler.ServeFile(c)
-					return
-				}
-				c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
-				return
-			}
-			// Serve SPA
+			// Serve SPA (including /oauth/authorize for embedded frontend)
 			staticHandler.ServeFile(c)
 		})
 	}
 
-	return r
+	return r, cleanupFn
 }
 
 // loadCustomEmailTemplates 从数据库加载自定义邮件模板

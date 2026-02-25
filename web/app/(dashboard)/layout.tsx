@@ -21,7 +21,9 @@ import {
   Menu,
   X,
   ChevronRight,
-  Globe
+  Globe,
+  Moon,
+  Sun
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -70,6 +72,7 @@ export default function DashboardLayout({
   const { user, isLoading, isAuthenticated, logout } = useAuth();
   const { t } = useI18n();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isDark, setIsDark] = useState(false);
 
   /* 前端构建ID，构建时由 next.config.ts 注入 */
   const frontendBuildId = process.env.NEXT_PUBLIC_BUILD_ID || 'dev';
@@ -84,6 +87,19 @@ export default function DashboardLayout({
   useEffect(() => {
     setSidebarOpen(false);
   }, [pathname]);
+
+  /* 初始化暗色模式状态（与 layout.tsx 内联脚本保持一致） */
+  useEffect(() => {
+    setIsDark(document.documentElement.classList.contains('dark'));
+  }, []);
+
+  /* 切换暗色模式：同步 DOM class + localStorage */
+  const toggleDarkMode = () => {
+    const next = !isDark;
+    setIsDark(next);
+    document.documentElement.classList.toggle('dark', next);
+    localStorage.setItem('theme', next ? 'dark' : 'light');
+  };
 
   const handleLogout = async () => {
     await logout();
@@ -234,7 +250,7 @@ export default function DashboardLayout({
                 <Badge variant="secondary" className="text-[10px]">Admin</Badge>
               )}
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <Button 
                 variant="outline" 
                 size="sm"
@@ -245,6 +261,14 @@ export default function DashboardLayout({
                 {t('nav.signOut')}
               </Button>
               <LanguageSwitcher />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={toggleDarkMode}
+                title={isDark ? 'Light Mode' : 'Dark Mode'}
+              >
+                {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </Button>
             </div>
             <p className="text-[10px] text-muted-foreground text-center mt-3 font-mono">
               Build {frontendBuildId}

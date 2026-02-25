@@ -6,12 +6,24 @@ package repository
 
 import (
 	"errors"
+	"strings"
 
 	"server/internal/model"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+/*
+ * escapeLike 转义 SQL LIKE 通配符
+ * 功能：将用户输入中的 %、_、\ 字符转义，防止注入通配符导致全表扫描
+ */
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
 
 /* 用户仓储层错误定义 */
 var (
@@ -265,9 +277,10 @@ func (r *UserRepository) SearchUsers(query string, filters map[string]interface{
 
 	db := r.db.Model(&model.User{})
 
-	// Apply text search
+	/* 文本搜索：转义 LIKE 通配符（%、_、\），防止用户输入干扰查询逻辑 */
 	if query != "" {
-		searchPattern := "%" + query + "%"
+		escaped := escapeLike(query)
+		searchPattern := "%" + escaped + "%"
 		db = db.Where("email LIKE ? OR username LIKE ? OR nickname LIKE ? OR phone_number LIKE ?",
 			searchPattern, searchPattern, searchPattern, searchPattern)
 	}

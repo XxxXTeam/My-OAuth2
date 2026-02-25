@@ -52,8 +52,8 @@ func main() {
 	}
 
 	// 配置 OAuth2 客户端 - 替换为你的实际值
-	clientID = getEnvOrDefault("OAUTH_CLIENT_ID", "3d32393e736224bf47319882765826e7")
-	clientSecret = getEnvOrDefault("OAUTH_CLIENT_SECRET", "c8e4d53ff666373e52990d11ddb0192f4ad8303e8e652f3d32fee96ac664d83e")
+	clientID = getEnvOrDefault("OAUTH_CLIENT_ID", "491dd7eadda1ce59d6a89cfcc3b38e1d")
+	clientSecret = getEnvOrDefault("OAUTH_CLIENT_SECRET", "bdf71b06cd4d70b837ae868e082e6bbc100fca8e06a2d705912e7836f9725bfe")
 	serverURL = getEnvOrDefault("OAUTH_SERVER_URL", "http://localhost:8080")
 
 	config := &oauth2.Config{
@@ -84,6 +84,7 @@ func main() {
 	http.HandleFunc("/introspect", handleIntrospect)
 	http.HandleFunc("/webhook-test", handleWebhookTest)
 	http.HandleFunc("/token-info", handleTokenInfo)
+	http.HandleFunc("/oidc-test", handleOIDCTest)
 	// 新增功能
 	http.HandleFunc("/device", handleDeviceFlow)
 	http.HandleFunc("/client-credentials", handleClientCredentials)
@@ -108,6 +109,7 @@ func main() {
 	fmt.Println("║  - /logout             退出登录                          ║")
 	fmt.Println("║                                                          ║")
 	fmt.Println("║  其他:                                                   ║")
+	fmt.Println("║  - /oidc-test          OIDC 综合测试                     ║")
 	fmt.Println("║  - /oidc               OIDC发现文档                      ║")
 	fmt.Println("║  - /webhook-test       Webhook测试                       ║")
 	fmt.Println("╠══════════════════════════════════════════════════════════╣")
@@ -173,7 +175,7 @@ func runCLI() {
 }
 
 func printCLIHelp() {
-	fmt.Println(`
+	fmt.Print(`
 OAuth2 CLI 测试工具
 
 用法: ./test [命令]
@@ -282,7 +284,7 @@ func cliAuthCodeFlow() {
 
 	// 启动本地服务器等待回调
 	fmt.Println("启动本地服务器等待回调 (http://localhost:9000/callback)...")
-	fmt.Println("授权完成后会自动获取Token\n")
+	fmt.Println("授权完成后会自动获取Token")
 
 	// 创建一个channel等待回调
 	tokenChan := make(chan *oauth2.Token, 1)
@@ -628,6 +630,7 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 14p
 
 <div class="card">
 <h2>OIDC / 调试工具</h2>
+<a href="/oidc-test" class="btn btn-success">OIDC 综合测试</a>
 <a href="/oidc" class="btn btn-primary">OIDC 发现文档</a>
 <a href="/webhook-test" class="btn btn-primary">Webhook 测试</a>
 </div>
@@ -803,6 +806,406 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 	renderMessage(w, "刷新成功", fmt.Sprintf("新Token已获取，过期时间: %s", newToken.Expiry.Format("2006-01-02 15:04:05")), "success")
 }
 
+/*
+ * oidcTestResult 单项 OIDC 测试结果
+ * 功能：记录每个测试用例的名称、分类、通过状态、详情和耗时
+ */
+type oidcTestResult struct {
+	Name     string
+	Category string
+	Pass     bool
+	Detail   string
+	Duration time.Duration
+}
+
+/*
+ * handleOIDCTest OIDC 综合自动化测试
+ * 功能：依次测试 Discovery / JWKS / WebFinger / UserInfo / Introspect / Revoke / Logout 等端点
+ *       输出每项测试的通过/失败状态和详细信息
+ */
+func handleOIDCTest(w http.ResponseWriter, r *http.Request) {
+	var results []oidcTestResult
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+
+	/* ========== 1. OIDC Discovery ========== */
+	func() {
+		t := time.Now()
+		resp, err := httpClient.Get(serverURL + "/.well-known/openid-configuration")
+		dur := time.Since(t)
+		if err != nil {
+			results = append(results, oidcTestResult{"Discovery 端点可达", "Discovery", false, err.Error(), dur})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+
+		if resp.StatusCode != 200 {
+			results = append(results, oidcTestResult{"Discovery 返回 200", "Discovery", false, fmt.Sprintf("status=%d", resp.StatusCode), dur})
+			return
+		}
+		results = append(results, oidcTestResult{"Discovery 端点可达", "Discovery", true, fmt.Sprintf("status=200, %d bytes", len(body)), dur})
+
+		var doc map[string]interface{}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			results = append(results, oidcTestResult{"Discovery JSON 解析", "Discovery", false, err.Error(), dur})
+			return
+		}
+		results = append(results, oidcTestResult{"Discovery JSON 解析", "Discovery", true, fmt.Sprintf("%d 个字段", len(doc)), dur})
+
+		/* 校验 OIDC Core 必填字段 */
+		requiredFields := []string{
+			"issuer", "authorization_endpoint", "token_endpoint",
+			"jwks_uri", "response_types_supported", "subject_types_supported",
+			"id_token_signing_alg_values_supported",
+		}
+		for _, field := range requiredFields {
+			if _, ok := doc[field]; ok {
+				results = append(results, oidcTestResult{"Discovery 必填字段: " + field, "Discovery", true, fmt.Sprintf("%v", doc[field]), 0})
+			} else {
+				results = append(results, oidcTestResult{"Discovery 必填字段: " + field, "Discovery", false, "缺失", 0})
+			}
+		}
+
+		/* 校验推荐字段 */
+		recommendedFields := []string{"userinfo_endpoint", "revocation_endpoint", "introspection_endpoint", "scopes_supported"}
+		for _, field := range recommendedFields {
+			if _, ok := doc[field]; ok {
+				results = append(results, oidcTestResult{"Discovery 推荐字段: " + field, "Discovery", true, fmt.Sprintf("%v", doc[field]), 0})
+			} else {
+				results = append(results, oidcTestResult{"Discovery 推荐字段: " + field, "Discovery", false, "缺失（建议补充）", 0})
+			}
+		}
+	}()
+
+	/* ========== 2. JWKS ========== */
+	func() {
+		t := time.Now()
+		resp, err := httpClient.Get(serverURL + "/.well-known/jwks.json")
+		dur := time.Since(t)
+		if err != nil {
+			results = append(results, oidcTestResult{"JWKS 端点可达", "JWKS", false, err.Error(), dur})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+
+		results = append(results, oidcTestResult{"JWKS 端点可达", "JWKS", resp.StatusCode == 200, fmt.Sprintf("status=%d", resp.StatusCode), dur})
+
+		var jwks map[string]interface{}
+		if err := json.Unmarshal(body, &jwks); err != nil {
+			results = append(results, oidcTestResult{"JWKS JSON 解析", "JWKS", false, err.Error(), dur})
+			return
+		}
+
+		keys, ok := jwks["keys"].([]interface{})
+		if !ok || len(keys) == 0 {
+			results = append(results, oidcTestResult{"JWKS 包含密钥", "JWKS", false, "keys 数组为空或不存在", 0})
+			return
+		}
+		results = append(results, oidcTestResult{"JWKS 包含密钥", "JWKS", true, fmt.Sprintf("%d 个密钥", len(keys)), 0})
+
+		/* 校验第一个 key 的必要字段 */
+		if key, ok := keys[0].(map[string]interface{}); ok {
+			for _, field := range []string{"kty", "kid", "use", "n", "e"} {
+				if v, exists := key[field]; exists {
+					detail := fmt.Sprintf("%v", v)
+					if len(detail) > 40 {
+						detail = detail[:40] + "..."
+					}
+					results = append(results, oidcTestResult{"JWKS Key 字段: " + field, "JWKS", true, detail, 0})
+				} else {
+					results = append(results, oidcTestResult{"JWKS Key 字段: " + field, "JWKS", false, "缺失", 0})
+				}
+			}
+		}
+	}()
+
+	/* ========== 3. WebFinger ========== */
+	func() {
+		t := time.Now()
+		resp, err := httpClient.Get(serverURL + "/.well-known/webfinger?resource=acct:admin@localhost&rel=http://openid.net/specs/connect/1.0/issuer")
+		dur := time.Since(t)
+		if err != nil {
+			results = append(results, oidcTestResult{"WebFinger 端点可达", "WebFinger", false, err.Error(), dur})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		results = append(results, oidcTestResult{"WebFinger 端点可达", "WebFinger", resp.StatusCode == 200, fmt.Sprintf("status=%d, %d bytes", resp.StatusCode, len(body)), dur})
+
+		var wf map[string]interface{}
+		if err := json.Unmarshal(body, &wf); err == nil {
+			if _, ok := wf["subject"]; ok {
+				results = append(results, oidcTestResult{"WebFinger subject 字段", "WebFinger", true, fmt.Sprintf("%v", wf["subject"]), 0})
+			} else {
+				results = append(results, oidcTestResult{"WebFinger subject 字段", "WebFinger", false, "缺失", 0})
+			}
+			if links, ok := wf["links"].([]interface{}); ok && len(links) > 0 {
+				results = append(results, oidcTestResult{"WebFinger links 字段", "WebFinger", true, fmt.Sprintf("%d 个链接", len(links)), 0})
+			} else {
+				results = append(results, oidcTestResult{"WebFinger links 字段", "WebFinger", false, "缺失或为空", 0})
+			}
+		}
+	}()
+
+	/* ========== 4. UserInfo（需要登录） ========== */
+	token, _ := client.GetToken(context.Background())
+	hasToken := token != nil && token.IsValid()
+
+	if hasToken {
+		func() {
+			t := time.Now()
+			req, _ := http.NewRequest("GET", serverURL+"/oauth/userinfo", nil)
+			req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+			resp, err := httpClient.Do(req)
+			dur := time.Since(t)
+			if err != nil {
+				results = append(results, oidcTestResult{"UserInfo 端点可达", "UserInfo", false, err.Error(), dur})
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			results = append(results, oidcTestResult{"UserInfo 端点可达", "UserInfo", resp.StatusCode == 200, fmt.Sprintf("status=%d", resp.StatusCode), dur})
+
+			var userInfo map[string]interface{}
+			if err := json.Unmarshal(body, &userInfo); err != nil {
+				results = append(results, oidcTestResult{"UserInfo JSON 解析", "UserInfo", false, err.Error(), 0})
+				return
+			}
+
+			/* 校验 OIDC 标准 claims */
+			checkClaims := []struct{ key, label string }{
+				{"sub", "sub (必须)"}, {"name", "name"}, {"preferred_username", "preferred_username"},
+				{"email", "email"}, {"email_verified", "email_verified"}, {"picture", "picture"},
+				{"nickname", "nickname"}, {"given_name", "given_name"}, {"family_name", "family_name"},
+				{"gender", "gender"}, {"birthdate", "birthdate"}, {"locale", "locale"},
+				{"zoneinfo", "zoneinfo"}, {"website", "website"}, {"bio", "bio"},
+				{"phone_number", "phone_number"}, {"phone_number_verified", "phone_number_verified"},
+				{"address", "address"}, {"updated_at", "updated_at"},
+			}
+			for _, claim := range checkClaims {
+				if v, ok := userInfo[claim.key]; ok {
+					detail := fmt.Sprintf("%v", v)
+					if len(detail) > 60 {
+						detail = detail[:60] + "..."
+					}
+					results = append(results, oidcTestResult{"UserInfo 声明: " + claim.label, "UserInfo", true, detail, 0})
+				} else {
+					results = append(results, oidcTestResult{"UserInfo 声明: " + claim.label, "UserInfo", false, "未返回", 0})
+				}
+			}
+		}()
+
+		/* ========== 5. Token Introspection ========== */
+		func() {
+			t := time.Now()
+			data := url.Values{}
+			data.Set("token", token.AccessToken)
+			data.Set("client_id", clientID)
+			data.Set("client_secret", clientSecret)
+			resp, err := httpClient.PostForm(serverURL+"/oauth/introspect", data)
+			dur := time.Since(t)
+			if err != nil {
+				results = append(results, oidcTestResult{"Introspect 端点可达", "Introspect", false, err.Error(), dur})
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			results = append(results, oidcTestResult{"Introspect 端点可达", "Introspect", resp.StatusCode == 200, fmt.Sprintf("status=%d", resp.StatusCode), dur})
+
+			var result map[string]interface{}
+			json.Unmarshal(body, &result)
+
+			if active, ok := result["active"].(bool); ok && active {
+				results = append(results, oidcTestResult{"Introspect active=true", "Introspect", true, "Token 有效", 0})
+			} else {
+				results = append(results, oidcTestResult{"Introspect active=true", "Introspect", false, fmt.Sprintf("返回: %s", string(body)), 0})
+			}
+
+			for _, field := range []string{"scope", "client_id", "token_type", "exp", "sub"} {
+				if v, ok := result[field]; ok {
+					results = append(results, oidcTestResult{"Introspect 字段: " + field, "Introspect", true, fmt.Sprintf("%v", v), 0})
+				} else {
+					results = append(results, oidcTestResult{"Introspect 字段: " + field, "Introspect", false, "未返回", 0})
+				}
+			}
+		}()
+
+		/* ========== 6. Token Revocation ========== */
+		func() {
+			/* 先刷新得到新 token 对，用于专门测试 revoke，不影响当前会话 */
+			refreshData := url.Values{}
+			refreshData.Set("grant_type", "refresh_token")
+			refreshData.Set("refresh_token", token.RefreshToken)
+			refreshData.Set("client_id", clientID)
+			refreshData.Set("client_secret", clientSecret)
+			refreshResp, err := httpClient.PostForm(serverURL+"/oauth/token", refreshData)
+			if err != nil || refreshResp.StatusCode != 200 {
+				results = append(results, oidcTestResult{"Revoke 准备: 刷新 Token", "Revoke", false, "无法刷新获取测试 Token", 0})
+				return
+			}
+			defer refreshResp.Body.Close()
+			var newTokens map[string]interface{}
+			body, _ := io.ReadAll(refreshResp.Body)
+			json.Unmarshal(body, &newTokens)
+			testAccessToken, _ := newTokens["access_token"].(string)
+			if testAccessToken == "" {
+				results = append(results, oidcTestResult{"Revoke 准备: 获取 Access Token", "Revoke", false, "返回中无 access_token", 0})
+				return
+			}
+			results = append(results, oidcTestResult{"Revoke 准备: 刷新 Token", "Revoke", true, "获得新 Token 对", 0})
+
+			/* 撤销这个新 access_token（独立 token，不影响当前会话） */
+			t := time.Now()
+			revokeData := url.Values{}
+			revokeData.Set("token", testAccessToken)
+			revokeData.Set("token_type_hint", "access_token")
+			revokeData.Set("client_id", clientID)
+			revokeData.Set("client_secret", clientSecret)
+			revokeResp, err := httpClient.PostForm(serverURL+"/oauth/revoke", revokeData)
+			dur := time.Since(t)
+			if err != nil {
+				results = append(results, oidcTestResult{"Revoke 端点可达", "Revoke", false, err.Error(), dur})
+				return
+			}
+			defer revokeResp.Body.Close()
+			results = append(results, oidcTestResult{"Revoke 端点可达", "Revoke", revokeResp.StatusCode == 200, fmt.Sprintf("status=%d", revokeResp.StatusCode), dur})
+
+			/* 验证撤销后 introspect 返回 active=false */
+			verifyData := url.Values{}
+			verifyData.Set("token", testAccessToken)
+			verifyData.Set("client_id", clientID)
+			verifyData.Set("client_secret", clientSecret)
+			verifyResp, err := httpClient.PostForm(serverURL+"/oauth/introspect", verifyData)
+			if err == nil {
+				defer verifyResp.Body.Close()
+				vBody, _ := io.ReadAll(verifyResp.Body)
+				var vResult map[string]interface{}
+				json.Unmarshal(vBody, &vResult)
+				if active, ok := vResult["active"].(bool); ok && !active {
+					results = append(results, oidcTestResult{"Revoke 验证: introspect active=false", "Revoke", true, "已撤销 Token 正确返回 inactive", 0})
+				} else {
+					results = append(results, oidcTestResult{"Revoke 验证: introspect active=false", "Revoke", false, fmt.Sprintf("返回: %s", string(vBody)), 0})
+				}
+			}
+		}()
+
+		/* ========== 7. OIDC Logout ========== */
+		func() {
+			t := time.Now()
+			req, _ := http.NewRequest("GET", serverURL+"/oauth/logout", nil)
+			/* 不跟随重定向，只检查响应状态 */
+			noRedirectClient := &http.Client{
+				Timeout: 10 * time.Second,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+			resp, err := noRedirectClient.Do(req)
+			dur := time.Since(t)
+			if err != nil {
+				results = append(results, oidcTestResult{"OIDC Logout 端点可达", "Logout", false, err.Error(), dur})
+				return
+			}
+			defer resp.Body.Close()
+			/* Logout 可能返回 200 或 302 重定向 */
+			pass := resp.StatusCode == 200 || resp.StatusCode == 302 || resp.StatusCode == 204
+			results = append(results, oidcTestResult{"OIDC Logout 端点可达", "Logout", pass, fmt.Sprintf("status=%d", resp.StatusCode), dur})
+		}()
+	} else {
+		results = append(results, oidcTestResult{"UserInfo / Introspect / Revoke / Logout", "Auth", false, "未登录，需要先完成 OAuth 授权才能测试这些端点", 0})
+	}
+
+	/* ========== 渲染测试结果页面 ========== */
+	passCount, failCount := 0, 0
+	for _, r := range results {
+		if r.Pass {
+			passCount++
+		} else {
+			failCount++
+		}
+	}
+
+	html := `<!DOCTYPE html>
+<html>
+<head><title>OIDC 综合测试</title>
+<style>
+body { font-family: system-ui; max-width: 1000px; margin: 0 auto; padding: 20px; background: #f8fafc; }
+h1 { color: #1e293b; }
+.summary { display: flex; gap: 16px; margin-bottom: 24px; }
+.summary-card { padding: 16px 24px; border-radius: 12px; font-size: 20px; font-weight: 600; }
+.summary-pass { background: #dcfce7; color: #166534; }
+.summary-fail { background: #fee2e2; color: #991b1b; }
+.summary-total { background: #e0e7ff; color: #3730a3; }
+.category { margin-bottom: 24px; }
+.category h2 { font-size: 16px; color: #475569; margin-bottom: 8px; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; }
+.test-row { display: flex; align-items: center; padding: 8px 12px; border-radius: 6px; margin-bottom: 2px; font-size: 13px; }
+.test-row:nth-child(even) { background: #f8fafc; }
+.test-row:nth-child(odd) { background: white; }
+.test-icon { width: 24px; flex-shrink: 0; font-size: 16px; }
+.test-name { flex: 1; color: #334155; font-weight: 500; }
+.test-detail { flex: 2; color: #64748b; font-size: 12px; word-break: break-all; }
+.test-time { width: 60px; text-align: right; color: #94a3b8; font-size: 11px; flex-shrink: 0; }
+.pass { color: #22c55e; }
+.fail { color: #ef4444; }
+.btn { display: inline-block; padding: 10px 20px; border-radius: 8px; text-decoration: none; margin-top: 16px; margin-right: 8px; font-weight: 500; }
+.btn-primary { background: #3b82f6; color: white; }
+.btn-default { background: #e2e8f0; color: #475569; }
+.note { background: #fef3c7; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; color: #92400e; }
+</style>
+</head>
+<body>
+<h1>🧪 OIDC 综合测试</h1>`
+
+	if !hasToken {
+		html += `<div class="note">⚠ 未登录 — 部分测试（UserInfo / Introspect / Revoke / Logout）需要先 <a href="/login">OAuth 授权登录</a> 后才能执行。</div>`
+	}
+
+	html += fmt.Sprintf(`
+<div class="summary">
+<div class="summary-card summary-total">共 %d 项</div>
+<div class="summary-card summary-pass">✓ 通过 %d</div>
+<div class="summary-card summary-fail">✗ 失败 %d</div>
+</div>`, passCount+failCount, passCount, failCount)
+
+	/* 按 Category 分组输出 */
+	categories := []string{}
+	catMap := make(map[string][]oidcTestResult)
+	for _, r := range results {
+		if _, exists := catMap[r.Category]; !exists {
+			categories = append(categories, r.Category)
+		}
+		catMap[r.Category] = append(catMap[r.Category], r)
+	}
+
+	for _, cat := range categories {
+		html += fmt.Sprintf(`<div class="category"><h2>%s</h2>`, cat)
+		for _, r := range catMap[cat] {
+			icon := `<span class="pass">✓</span>`
+			if !r.Pass {
+				icon = `<span class="fail">✗</span>`
+			}
+			durStr := ""
+			if r.Duration > 0 {
+				durStr = fmt.Sprintf("%dms", r.Duration.Milliseconds())
+			}
+			html += fmt.Sprintf(`<div class="test-row"><div class="test-icon">%s</div><div class="test-name">%s</div><div class="test-detail">%s</div><div class="test-time">%s</div></div>`,
+				icon, r.Name, r.Detail, durStr)
+		}
+		html += `</div>`
+	}
+
+	html += `
+<a href="/oidc-test" class="btn btn-primary">重新测试</a>
+<a href="/" class="btn btn-default">返回首页</a>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
+}
+
 // handleOIDC 查看OIDC发现文档和相关端点
 func handleOIDC(w http.ResponseWriter, r *http.Request) {
 	endpoint := r.URL.Query().Get("endpoint")
@@ -906,9 +1309,7 @@ func handleIntrospect(w http.ResponseWriter, r *http.Request) {
 
 	// 调用introspect端点
 	reqBody := fmt.Sprintf("token=%s&client_id=%s&client_secret=%s",
-		token.AccessToken,
-		"70e2c01bc1c780287047594ec1967279",
-		"f6abbeec2e27f9d13c93473cbc84bde1bdf34be6eeb321708ce62f27a259f534")
+		token.AccessToken, clientID, clientSecret)
 
 	resp, err := http.Post(serverURL+"/oauth/introspect",
 		"application/x-www-form-urlencoded",
@@ -941,9 +1342,7 @@ func handleTokenInfo(w http.ResponseWriter, r *http.Request) {
 
 	// 获取Token自省结果
 	reqBody := fmt.Sprintf("token=%s&client_id=%s&client_secret=%s",
-		token.AccessToken,
-		"70e2c01bc1c780287047594ec1967279",
-		"f6abbeec2e27f9d13c93473cbc84bde1bdf34be6eeb321708ce62f27a259f534")
+		token.AccessToken, clientID, clientSecret)
 	resp, _ := http.Post(serverURL+"/oauth/introspect",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(reqBody))
@@ -1017,12 +1416,34 @@ pre { background: #1e293b; color: #e2e8f0; padding: 12px; border-radius: 8px; ov
 <h2><span>👤</span> 用户信息 (UserInfo)</h2>`
 
 	if userInfo != nil {
-		html += `
-<div class="info-row"><span class="info-label">Subject (sub)</span><span class="info-value">` + userInfo.Sub + `</span></div>
-<div class="info-row"><span class="info-label">用户名</span><span class="info-value">` + userInfo.PreferredUsername + `</span></div>
-<div class="info-row"><span class="info-label">邮箱</span><span class="info-value">` + userInfo.Email + `</span></div>
-<div class="info-row"><span class="info-label">邮箱已验证</span><span class="info-value">` + fmt.Sprintf("%v", userInfo.EmailVerified) + `</span></div>
-<div class="info-row"><span class="info-label">显示名称</span><span class="info-value">` + userInfo.Name + `</span></div>`
+		html += infoRow("Subject (sub)", userInfo.Sub)
+		html += infoRow("显示名称", userInfo.Name)
+		html += infoRow("用户名", userInfo.PreferredUsername)
+		html += infoRow("昵称", userInfo.Nickname)
+		html += infoRow("姓", userInfo.FamilyName)
+		html += infoRow("名", userInfo.GivenName)
+		html += infoRow("邮箱", userInfo.Email)
+		html += infoRow("邮箱已验证", fmt.Sprintf("%v", userInfo.EmailVerified))
+		html += infoRow("头像", userInfo.Picture)
+		html += infoRow("性别", userInfo.Gender)
+		html += infoRow("生日", userInfo.Birthdate)
+		html += infoRow("电话", userInfo.PhoneNumber)
+		html += infoRow("电话已验证", fmt.Sprintf("%v", userInfo.PhoneNumberVerified))
+		html += infoRow("语言", userInfo.Locale)
+		html += infoRow("时区", userInfo.Zoneinfo)
+		html += infoRow("网站", userInfo.Website)
+		html += infoRow("简介", userInfo.Bio)
+		if userInfo.Address != nil {
+			html += infoRow("地址", userInfo.Address.Formatted)
+		}
+		if userInfo.UpdatedAt > 0 {
+			html += infoRow("更新时间", time.Unix(userInfo.UpdatedAt, 0).Format("2006-01-02 15:04:05"))
+		}
+		if len(userInfo.SocialAccounts) > 0 {
+			for k, v := range userInfo.SocialAccounts {
+				html += infoRow("社交-"+k, v)
+			}
+		}
 	} else {
 		html += `<div class="info-row"><span class="info-label">状态</span><span class="info-value invalid">获取失败</span></div>`
 	}
@@ -1233,6 +1654,14 @@ setInterval(loadLogs, 3000);
 	_ = accessToken // 预留使用
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
+}
+
+/* infoRow 生成 UserInfo 信息行 HTML */
+func infoRow(label, value string) string {
+	if value == "" {
+		value = `<span style="color:#94a3b8">-</span>`
+	}
+	return `<div class="info-row"><span class="info-label">` + label + `</span><span class="info-value">` + value + `</span></div>`
 }
 
 // 辅助函数

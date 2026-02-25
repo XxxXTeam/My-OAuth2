@@ -14,7 +14,7 @@ import { PageHeader } from '@/components/ui/page-header';
 import {
   Users, AppWindow, Loader2, Shield, Trash2, UserCog, Activity, TrendingUp, Clock,
   CheckCircle, XCircle, Search, ChevronLeft, ChevronRight, Ban, UserCheck, KeyRound,
-  Download, MoreHorizontal, X, AlertCircle, Check, UserPlus, Eye, Mail, Pencil
+  Download, MoreHorizontal, X, AlertCircle, Check, UserPlus, Eye, Mail, Pencil, Unlock
 } from 'lucide-react';
 import type { User, AdminStats, LoginTrend } from '@/lib/types';
 
@@ -210,12 +210,21 @@ function UserDetailDialog({ userData, onClose }: { userData: User; onClose: () =
   const { t, dateLocale } = useI18n();
   const [sendingReset, setSendingReset] = useState(false);
   const [resetResult, setResetResult] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
 
   const handleSendResetEmail = async () => {
     setSendingReset(true); setResetResult(null);
     const response = await api.sendResetEmail(userData.id);
     setResetResult(response.success ? t('admin.users.sendResetEmailSuccess') : (response.error?.message || t('admin.users.sendResetEmailFailed')));
     setSendingReset(false);
+  };
+
+  /* 管理员解锁用户账户 */
+  const handleUnlockUser = async () => {
+    setUnlocking(true); setResetResult(null);
+    const response = await api.unlockUser(userData.id);
+    setResetResult(response.success ? t('admin.users.unlockSuccess') : (response.error?.message || t('admin.users.unlockFailed')));
+    setUnlocking(false);
   };
 
   const fields = [
@@ -269,6 +278,9 @@ function UserDetailDialog({ userData, onClose }: { userData: User; onClose: () =
         </dl>
         {resetResult && (<div className="mt-4 p-3 bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 rounded-lg text-sm">{resetResult}</div>)}
         <div className="flex justify-end gap-2 mt-4">
+          <Button variant="outline" size="sm" onClick={handleUnlockUser} disabled={unlocking}>
+            {unlocking ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Unlock className="h-4 w-4 mr-1" />}{t('admin.users.unlock')}
+          </Button>
           <Button variant="outline" size="sm" onClick={handleSendResetEmail} disabled={sendingReset}>
             {sendingReset ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Mail className="h-4 w-4 mr-1" />}{t('admin.users.sendResetEmail')}
           </Button>
@@ -552,12 +564,19 @@ export default function AdminPage() {
                           </Badge>
                         </td>
                         <td className="p-3">
-                          <Badge
-                            variant={u.status === 'suspended' ? 'destructive' : u.status === 'pending' ? 'outline' : 'secondary'}
-                            className="text-xs"
-                          >
-                            {u.status === 'suspended' ? t('admin.users.suspended') : u.status === 'pending' ? t('admin.users.pending') : t('admin.users.active')}
-                          </Badge>
+                          <div className="flex gap-1 flex-wrap">
+                            <Badge
+                              variant={u.status === 'suspended' ? 'destructive' : u.status === 'pending' ? 'outline' : 'secondary'}
+                              className="text-xs"
+                            >
+                              {u.status === 'suspended' ? t('admin.users.suspended') : u.status === 'pending' ? t('admin.users.pending') : t('admin.users.active')}
+                            </Badge>
+                            {u.locked_until && new Date(u.locked_until) > new Date() && (
+                              <Badge variant="destructive" className="text-xs">
+                                {t('admin.users.locked')}
+                              </Badge>
+                            )}
+                          </div>
                         </td>
                         <td className="p-3 hidden lg:table-cell text-muted-foreground text-xs">
                           {u.last_login_at ? new Date(u.last_login_at).toLocaleString(dateLocale) : t('admin.users.neverLoggedIn')}

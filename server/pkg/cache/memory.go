@@ -21,6 +21,7 @@ type MemoryCache struct {
 	items      map[string]*memoryEntry
 	defaultTTL time.Duration
 	stopCh     chan struct{}
+	closeOnce  sync.Once
 }
 
 // NewMemoryCache creates a new in-memory cache
@@ -117,7 +118,9 @@ func (mc *MemoryCache) Exists(_ context.Context, key string) (bool, error) {
 }
 
 func (mc *MemoryCache) Close() error {
-	close(mc.stopCh)
+	mc.closeOnce.Do(func() {
+		close(mc.stopCh)
+	})
 	return nil
 }
 

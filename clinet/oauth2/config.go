@@ -18,6 +18,11 @@ type Config struct {
 	RedirectURL  string   /* 回调 URL */
 	Scopes       []string /* 请求的权限范围 */
 	UsePKCE      bool     /* 是否启用 PKCE (RFC 7636) */
+
+	/* HTTP 客户端配置 */
+	TimeoutSec int /* 请求超时秒数（默认 30） */
+	MaxRetries int /* 最大重试次数（默认 3，仅对可重试错误生效） */
+	RetryDelay int /* 重试间隔毫秒（默认 500，指数退避） */
 }
 
 /*
@@ -39,15 +44,22 @@ func (c *Config) Validate() error {
 		return errors.New("oauth2: redirect_url is required")
 	}
 
-	// Validate URLs
-	if _, err := url.Parse(c.AuthURL); err != nil {
-		return errors.New("oauth2: invalid auth_url")
-	}
-	if _, err := url.Parse(c.TokenURL); err != nil {
-		return errors.New("oauth2: invalid token_url")
-	}
-	if _, err := url.Parse(c.RedirectURL); err != nil {
-		return errors.New("oauth2: invalid redirect_url")
+	/* 校验 URL 格式和协议安全性 */
+	for _, pair := range []struct {
+		name, val string
+	}{
+		{"auth_url", c.AuthURL},
+		{"token_url", c.TokenURL},
+		{"redirect_url", c.RedirectURL},
+	} {
+		parsed, err := url.Parse(pair.val)
+		if err != nil {
+			return errors.New("oauth2: invalid " + pair.name)
+		}
+		/* 仅允许 http/https 协议，阻止 javascript:/data: 等危险协议 */
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return errors.New("oauth2: " + pair.name + " must use http or https scheme")
+		}
 	}
 
 	return nil

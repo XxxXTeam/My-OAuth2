@@ -1,7 +1,9 @@
 package oauth2
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -19,13 +21,21 @@ type Token struct {
 	Raw          map[string]interface{} `json:"-"`                       /* 原始响应数据 */
 }
 
-/* IsExpired 检查令牌是否已过期（提前 10 秒判定为过期） */
+/*
+ * IsExpired 检查令牌是否已过期
+ * 功能：提前 10~15 秒（含随机 jitter）判定为过期，
+ *       防止多个客户端实例在同一时刻集中刷新造成惊群效应
+ */
 func (t *Token) IsExpired() bool {
 	if t.Expiry.IsZero() {
 		return false
 	}
-	// Consider token expired 10 seconds before actual expiry
-	return time.Now().Add(10 * time.Second).After(t.Expiry)
+	/* 基础提前量 10 秒 + 随机 jitter 0~5 秒 */
+	jitter := time.Duration(0)
+	if n, err := rand.Int(rand.Reader, big.NewInt(5000)); err == nil {
+		jitter = time.Duration(n.Int64()) * time.Millisecond
+	}
+	return time.Now().Add(10*time.Second + jitter).After(t.Expiry)
 }
 
 /* IsValid 检查令牌是否有效（非空且未过期） */

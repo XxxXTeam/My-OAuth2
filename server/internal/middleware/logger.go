@@ -15,6 +15,20 @@ import (
 	"github.com/google/uuid"
 )
 
+/* formatBytes 将字节数转为可读格式（B/KB/MB） */
+func formatBytes(size int) string {
+	if size < 0 {
+		return "0B"
+	}
+	if size < 1024 {
+		return fmt.Sprintf("%dB", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1fKB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%.1fMB", float64(size)/1024/1024)
+}
+
 // TraceID middleware injects trace ID into context
 func TraceID() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -47,6 +61,7 @@ func shouldLogRequest(path string) bool {
 		"/api/",
 		"/oauth/",
 		"/token/",
+		"/.well-known/",
 	}
 	for _, prefix := range logPrefixes {
 		if strings.HasPrefix(path, prefix) {
@@ -93,6 +108,7 @@ func RequestLogger() gin.HandlerFunc {
 		statusCode := c.Writer.Status()
 		method := c.Request.Method
 		clientIP := c.ClientIP()
+		responseSize := c.Writer.Size()
 
 		/* HTTP 方法颜色 */
 		methodColor := "\033[34m" // 蓝色
@@ -118,12 +134,16 @@ func RequestLogger() gin.HandlerFunc {
 			statusColor = "\033[36m" // 青色
 		}
 
-		/* 构建带颜色的紧凑 HTTP 日志 */
-		httpMsg := fmt.Sprintf("%s%s\033[0m %s%d\033[0m \033[1;37m%s\033[0m \033[90m%s\033[0m \033[90m%s\033[0m",
+		/* 响应体大小可读格式 */
+		sizeStr := formatBytes(responseSize)
+
+		/* 构建带颜色的紧凑 HTTP 日志（含响应体大小） */
+		httpMsg := fmt.Sprintf("%s%s\033[0m %s%d\033[0m \033[1;37m%s\033[0m \033[90m%s\033[0m \033[90m%s\033[0m \033[90m%s\033[0m",
 			methodColor, method,
 			statusColor, statusCode,
 			path,
 			latency.String(),
+			sizeStr,
 			clientIP,
 		)
 
@@ -134,6 +154,12 @@ func RequestLogger() gin.HandlerFunc {
 		}
 		if userID, exists := c.Get("user_id"); exists {
 			httpMsg += fmt.Sprintf(" \033[36muid\033[0m=%v", userID)
+		}
+
+		/* 慢请求告警阈值：超过 3 秒标记为慢请求 */
+		const slowRequestThreshold = 3 * time.Second
+		if latency > slowRequestThreshold {
+			httpMsg += fmt.Sprintf(" \033[1;33m⚠ SLOW(%s)\033[0m", latency.Round(time.Millisecond))
 		}
 
 		/* 根据状态码选择日志等级，使用 LogHTTP 输出 [HTTP] 标签替代误导性的 middleware 文件位置 */

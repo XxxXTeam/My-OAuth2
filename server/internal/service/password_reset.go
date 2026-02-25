@@ -161,14 +161,21 @@ func (s *PasswordResetService) ResetPassword(token, newPassword string) error {
 		return err
 	}
 
+	/* 校验新密码强度（含常见弱密码黑名单） */
+	if err := password.ValidateStrength(newPassword); err != nil {
+		return err
+	}
+
 	// 哈希新密码
 	hashedPassword, err := password.Hash(newPassword)
 	if err != nil {
 		return err
 	}
 
-	// 更新密码
+	/* 更新密码并重置锁定状态（用户可能因连续登录失败被锁定后通过重置密码恢复） */
 	user.PasswordHash = hashedPassword
+	user.FailedLogins = 0
+	user.LockedUntil = nil
 	if err := s.userRepo.Update(user); err != nil {
 		return err
 	}

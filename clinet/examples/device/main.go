@@ -40,6 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer client.Close()
 
 	fmt.Println("╔══════════════════════════════════════════════════╗")
 	fmt.Println("║         Device Flow 设备授权示例                 ║")

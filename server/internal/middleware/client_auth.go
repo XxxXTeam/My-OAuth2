@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
+	crand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
@@ -108,8 +109,8 @@ func (ca *ClientAuthenticator) authenticateWithSecret(clientID, clientSecret str
 		}
 	}
 
-	// Verify secret
-	if app.ClientSecret != clientSecret {
+	/* 使用常量时间比较验证 client_secret，防止时序攻击 */
+	if !hmac.Equal([]byte(app.ClientSecret), []byte(clientSecret)) {
 		return nil, errors.New("invalid client secret")
 	}
 
@@ -268,7 +269,7 @@ func (ca *ClientAuthenticator) verifyWithJWKS(assertion string, app *model.Appli
 			return nil, errors.New("invalid JWKS")
 		}
 	} else if app.JWKSURI != "" {
-		/* 从远程 JWKS URI 获取公钥集合 */
+		/* 从远程 JWKS URI 获取公钥集合（限制响应体 1MB，防止恶意大响应） */
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Get(app.JWKSURI)
 		if err != nil {
@@ -278,7 +279,8 @@ func (ca *ClientAuthenticator) verifyWithJWKS(assertion string, app *model.Appli
 		if resp.StatusCode != http.StatusOK {
 			return nil, errors.New("JWKS URI returned non-200 status")
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		limitedBody := http.MaxBytesReader(nil, resp.Body, 1<<20) /* 1MB 限制 */
+		if err := json.NewDecoder(limitedBody).Decode(&jwks); err != nil {
 			return nil, errors.New("failed to parse JWKS from URI")
 		}
 	}
@@ -409,10 +411,18 @@ func GenerateClientSecretJWT(clientID, clientSecret, audience string, expiry tim
 	return token.SignedString([]byte(clientSecret))
 }
 
-// generateJTI generates a unique JWT ID
+/*
+ * generateJTI 生成唯一的 JWT ID
+ * 使用 crypto/rand 生成安全随机字节，替代基于时间的弱随机源
+ */
 func generateJTI() string {
-	h := hmac.New(sha256.New, []byte(time.Now().String()))
-	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))[:16]
+	b := make([]byte, 16)
+	if _, err := crand.Read(b); err != nil {
+		/* 回退：使用时间戳哈希（不应到达此处） */
+		h := hmac.New(sha256.New, []byte(time.Now().String()))
+		return base64.RawURLEncoding.EncodeToString(h.Sum(nil))[:16]
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // ClientAuthMiddleware creates a Gin middleware for client authentication

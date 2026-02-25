@@ -134,10 +134,13 @@ export default function NewAppPage() {
                 {redirectUris.map((uri, index) => (
                   <div key={index} className="flex gap-2">
                     <Input
+                      type="url"
                       placeholder="https://example.com/callback"
                       value={uri}
                       onChange={(e) => handleUriChange(index, e.target.value)}
                       disabled={isLoading}
+                      spellCheck={false}
+                      autoComplete="off"
                     />
                     {redirectUris.length > 1 && (
                       <Button

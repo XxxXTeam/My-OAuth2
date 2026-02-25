@@ -31,7 +31,7 @@ fs.mkdirSync(DIST, { recursive: true });
 
 /* 2. 执行 next build */
 console.log('[build] 执行 next build...');
-execSync('npx next build', { cwd: ROOT, stdio: 'inherit' });
+execSync('bunx next build', { cwd: ROOT, stdio: 'inherit' });
 
 /* 3. 复制 out → dist */
 console.log('[build] 复制构建产物到 dist...');

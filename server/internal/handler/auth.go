@@ -10,6 +10,8 @@ import (
 	"server/internal/middleware"
 	"server/internal/model"
 	"server/internal/service"
+	"server/pkg/password"
+	"server/pkg/sanitize"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -92,6 +94,16 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
+	/* 输入清洗：防止 XSS 和非法字符 */
+	req.Email = sanitize.Email(req.Email)
+	req.Username = sanitize.StripHTML(req.Username)
+	username, valid := sanitize.Username(req.Username)
+	if !valid {
+		Error(c, http.StatusBadRequest, ErrCodeBadRequest, "Username can only contain letters, numbers, underscores, hyphens and CJK characters (3-50 chars)")
+		return
+	}
+	req.Username = username
+
 	user, err := h.authService.Register(&service.RegisterInput{
 		Email:    req.Email,
 		Username: req.Username,
@@ -104,6 +116,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		}
 		if errors.Is(err, service.ErrUsernameExists) {
 			Error(c, http.StatusConflict, ErrCodeUsernameExists, "Username already exists")
+			return
+		}
+		if errors.Is(err, service.ErrPasswordTooWeak) {
+			Error(c, http.StatusBadRequest, ErrCodeWeakPassword, "Password must be 8-72 characters")
 			return
 		}
 		Error(c, http.StatusInternalServerError, ErrCodeInternalError, "Failed to create user")
@@ -152,6 +168,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidCredentials) {
 			Error(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid email or password")
+			return
+		}
+		if errors.Is(err, service.ErrAccountLocked) {
+			Error(c, http.StatusTooManyRequests, "ACCOUNT_LOCKED", "Account temporarily locked due to too many failed attempts. Please try again later.")
 			return
 		}
 		Error(c, http.StatusInternalServerError, ErrCodeInternalError, "Failed to login")
@@ -317,6 +337,37 @@ func (h *AuthHandler) setAuthCookies(c *gin.Context, tokens *service.AuthTokens)
 		false, /* 非 httpOnly */
 		sameSite,
 	)
+}
+
+/*
+ * CheckPasswordStrength 密码强度实时校验（公开接口，无需认证）
+ * @route POST /api/auth/check-password
+ * 功能：前端注册/修改密码时实时检测密码强度，返回评分和具体项目
+ */
+func (h *AuthHandler) CheckPasswordStrength(c *gin.Context) {
+	var req struct {
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, "password is required")
+		return
+	}
+	result := password.CheckStrength(req.Password)
+	validationErr := password.ValidateStrength(req.Password)
+	resp := gin.H{
+		"score":        result.Score,
+		"level":        result.Level,
+		"has_upper":    result.HasUpper,
+		"has_lower":    result.HasLower,
+		"has_digit":    result.HasDigit,
+		"has_special":  result.HasSpecial,
+		"length_valid": result.LengthValid,
+		"valid":        validationErr == nil,
+	}
+	if validationErr != nil {
+		resp["error"] = validationErr.Error()
+	}
+	Success(c, resp)
 }
 
 /* clearAuthCookies 清除所有鉴权 Cookie */

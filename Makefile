@@ -45,13 +45,31 @@ prod: build
 	@echo "Production build complete!"
 	@echo "Run: ./bin/oauth2-server"
 
+# Docker build
+docker:
+	@echo "Building Docker image..."
+	docker build -t my-oauth2:latest .
+	@echo "Docker build complete!"
+
+# Docker run (SQLite mode)
+docker-run:
+	docker compose up -d
+	@echo "Server running at http://localhost:8080"
+
+# Docker stop
+docker-stop:
+	docker compose down
+
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  make build      - Build web frontend and server"
-	@echo "  make build-web  - Build web frontend only"
+	@echo "  make build        - Build web frontend and server"
+	@echo "  make build-web    - Build web frontend only"
 	@echo "  make build-server - Build server only"
-	@echo "  make clean      - Clean build artifacts"
-	@echo "  make dev        - Show development instructions"
-	@echo "  make run        - Run server (dev mode)"
-	@echo "  make prod       - Build for production"
+	@echo "  make clean        - Clean build artifacts"
+	@echo "  make dev          - Show development instructions"
+	@echo "  make run          - Run server (dev mode)"
+	@echo "  make prod         - Build for production"
+	@echo "  make docker       - Build Docker image"
+	@echo "  make docker-run   - Start with docker compose"
+	@echo "  make docker-stop  - Stop docker compose"

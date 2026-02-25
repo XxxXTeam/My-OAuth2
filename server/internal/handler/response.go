@@ -48,15 +48,26 @@ func Created(c *gin.Context, data interface{}) {
  * @param status  - HTTP 状态码
  * @param code    - 业务错误码
  * @param message - 可读错误消息
+ * 自动附带 trace_id（如果存在），方便前端关联日志排查
  */
 func Error(c *gin.Context, status int, code, message string) {
-	c.JSON(status, Response{
+	resp := Response{
 		Success: false,
 		Error: &ErrorInfo{
 			Code:    code,
 			Message: message,
 		},
-	})
+	}
+	/* 附带 trace_id 方便日志关联 */
+	if traceID, exists := c.Get("trace_id"); exists {
+		c.JSON(status, gin.H{
+			"success":  resp.Success,
+			"error":    resp.Error,
+			"trace_id": traceID,
+		})
+		return
+	}
+	c.JSON(status, resp)
 }
 
 /* BadRequest 发送 400 错误请求响应 */

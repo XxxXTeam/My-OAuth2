@@ -45,6 +45,8 @@ export interface User {
   external_id?: string;
   external_source?: string;
   last_login_at?: string;
+  failed_logins?: number;
+  locked_until?: string;
 }
 
 export interface UpdateProfileRequest {
@@ -173,6 +175,7 @@ export interface ApiResponse<T> {
   error?: {
     code: string;
     message: string;
+    retryAfter?: number;
   };
 }
 

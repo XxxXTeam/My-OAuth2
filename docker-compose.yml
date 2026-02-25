@@ -1,0 +1,164 @@
+##
+## OAuth2 Authorization Server - Docker Compose 部署配置
+## 支持三种模式：
+##   1. SQLite（默认，适合开发和小规模部署）
+##   2. PostgreSQL（生产推荐）
+##   3. MySQL（可选）
+##
+## 使用方式：
+##   开发模式：  docker compose up -d
+##   PostgreSQL：docker compose --profile postgres up -d
+##   MySQL：     docker compose --profile mysql up -d
+##
+
+services:
+  ## ========================================
+  ## OAuth2 服务端（SQLite 模式，默认）
+  ## ========================================
+  oauth2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_ID: ${BUILD_ID:-docker-compose}
+    image: my-oauth2:latest
+    container_name: oauth2-server
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - oauth2-data:/app/data
+      - oauth2-avatars:/app/uploads/avatars
+    environment:
+      - GIN_MODE=${GIN_MODE:-release}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  ## ========================================
+  ## PostgreSQL（使用 --profile postgres 启用）
+  ## ========================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: oauth2-postgres
+    restart: unless-stopped
+    profiles:
+      - postgres
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${PG_DB:-oauth2}
+      POSTGRES_USER: ${PG_USER:-oauth2}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-oauth2secret}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-oauth2}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ## OAuth2 + PostgreSQL 模式
+  oauth2-pg:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: my-oauth2:latest
+    container_name: oauth2-server-pg
+    restart: unless-stopped
+    profiles:
+      - postgres
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - oauth2-data:/app/data
+      - oauth2-avatars:/app/uploads/avatars
+    environment:
+      - GIN_MODE=${GIN_MODE:-release}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  ## ========================================
+  ## MySQL（使用 --profile mysql 启用）
+  ## ========================================
+  mysql:
+    image: mysql:8.0
+    container_name: oauth2-mysql
+    restart: unless-stopped
+    profiles:
+      - mysql
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DB:-oauth2}
+      MYSQL_USER: ${MYSQL_USER:-oauth2}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-oauth2secret}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootsecret}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ## OAuth2 + MySQL 模式
+  oauth2-mysql:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: my-oauth2:latest
+    container_name: oauth2-server-mysql
+    restart: unless-stopped
+    profiles:
+      - mysql
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - oauth2-data:/app/data
+      - oauth2-avatars:/app/uploads/avatars
+    environment:
+      - GIN_MODE=${GIN_MODE:-release}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  oauth2-data:
+    driver: local
+  oauth2-avatars:
+    driver: local
+  pg-data:
+    driver: local
+  mysql-data:
+    driver: local

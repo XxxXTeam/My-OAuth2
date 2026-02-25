@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -142,7 +143,14 @@ func main() {
 	}
 
 	/* 校验配置合法性 */
-	if errs := cfg.Validate(); len(errs) > 0 {
+	errs, warns := cfg.Validate()
+	if len(warns) > 0 {
+		fmt.Printf("\n%s%s ⚠ Configuration warnings:%s\n", colorBold, "\033[33m", colorReset)
+		for _, w := range warns {
+			fmt.Printf("   %s• %s%s\n", "\033[33m", w, colorReset)
+		}
+	}
+	if len(errs) > 0 {
 		fmt.Printf("\n%s%s ✗ Configuration validation failed:%s\n", colorBold, "\033[31m", colorReset)
 		for _, e := range errs {
 			fmt.Printf("   %s• %s%s\n", "\033[31m", e, colorReset)
@@ -151,58 +159,124 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 初始化数据库
-	if err := database.Init(&cfg.Database); err != nil {
-		printInitError("Database", err)
+	/* 并行初始化数据库和缓存（互不依赖） */
+	var (
+		cacheInstance   cache.Cache
+		cacheDriver     string
+		dbErr, cacheErr error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		dbErr = database.Init(&cfg.Database)
+	}()
+	go func() {
+		defer wg.Done()
+		ttl := time.Duration(cfg.Cache.DefaultTTLSec) * time.Second
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		cacheInstance, cacheErr = cache.New(&cache.Config{
+			Driver:           cfg.Cache.Driver,
+			RedisURL:         cfg.Cache.RedisURL,
+			MemcachedServers: cfg.Cache.MemcachedServers,
+			BadgerPath:       cfg.Cache.BadgerPath,
+			FileDir:          cfg.Cache.FileDir,
+			Prefix:           cfg.Cache.Prefix,
+			DefaultTTL:       ttl,
+		})
+		cacheDriver = cfg.Cache.Driver
+		if cacheErr != nil {
+			cacheInstance = cache.NewMemoryCache(ttl)
+			cacheDriver = "memory (fallback)"
+		}
+	}()
+	wg.Wait()
+
+	if dbErr != nil {
+		printInitError("Database", dbErr)
 		os.Exit(1)
 	}
 	printInitStep("✓", "Database", fmt.Sprintf("driver=%s", cfg.Database.Driver))
-
-	// 初始化缓存
-	ttl := time.Duration(cfg.Cache.DefaultTTLSec) * time.Second
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-	cacheInstance, err := cache.New(&cache.Config{
-		Driver:           cfg.Cache.Driver,
-		RedisURL:         cfg.Cache.RedisURL,
-		MemcachedServers: cfg.Cache.MemcachedServers,
-		BadgerPath:       cfg.Cache.BadgerPath,
-		FileDir:          cfg.Cache.FileDir,
-		Prefix:           cfg.Cache.Prefix,
-		DefaultTTL:       ttl,
-	})
-	cacheDriver := cfg.Cache.Driver
-	if err != nil {
-		cacheInstance = cache.NewMemoryCache(ttl)
-		cacheDriver = "memory (fallback)"
-	}
 	printInitStep("✓", "Cache", fmt.Sprintf("driver=%s ttl=%ds", cacheDriver, cfg.Cache.DefaultTTLSec))
 
 	// 设置路由
 	router.SetBuildInfo(buildID)
-	r := router.Setup(cfg, cacheInstance)
+	r, routerCleanup := router.Setup(cfg, cacheInstance)
 	printInitStep("✓", "Router", "routes registered")
 
 	// Webhook background retry worker
 	webhookRepo := repository.NewWebhookRepository(database.GetDB())
 	webhookSvc := service.NewWebhookService(webhookRepo)
-	webhookCtx, webhookCancel := context.WithCancel(context.Background())
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-webhookCtx.Done():
+			case <-bgCtx.Done():
 				return
 			case <-ticker.C:
-				if err := webhookSvc.ProcessPendingDeliveries(webhookCtx); err != nil {
+				if err := webhookSvc.ProcessPendingDeliveries(bgCtx); err != nil {
 					logger.Warn("Webhook retry worker error", "error", err)
 				}
 			}
 		}
 	}()
 	printInitStep("✓", "Webhook", "background retry worker started")
+
+	/*
+	 * 过期数据自动清理任务：每 30 分钟清理一次
+	 * 覆盖：授权码、access_token、refresh_token、device_code、密码重置令牌、
+	 *       邮件验证令牌、已完成的旧邮件任务、90 天以上的登录日志
+	 * 优化：Repository 延迟到 goroutine 内部创建，不阻塞启动
+	 */
+	go func() {
+		db := database.GetDB()
+		oauthRepo := repository.NewOAuthRepository(db)
+		deviceCodeRepo := repository.NewDeviceCodeRepository(db)
+		passwordResetRepo := repository.NewPasswordResetRepository(db)
+		emailVerifyRepo := repository.NewEmailVerificationRepository(db)
+		emailTaskRepo := repository.NewEmailTaskRepository(db)
+		loginLogRepo := repository.NewLoginLogRepository(db)
+
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if err := oauthRepo.DeleteExpiredAuthorizationCodes(); err != nil {
+					logger.Warn("Failed to clean expired auth codes", "error", err)
+				}
+				if err := oauthRepo.DeleteExpiredTokens(); err != nil {
+					logger.Warn("Failed to clean expired tokens", "error", err)
+				}
+				if err := oauthRepo.CleanExpiredAuthRefreshTokens(); err != nil {
+					logger.Warn("Failed to clean expired auth refresh tokens", "error", err)
+				}
+				if err := deviceCodeRepo.DeleteExpired(); err != nil {
+					logger.Warn("Failed to clean expired device codes", "error", err)
+				}
+				if err := passwordResetRepo.DeleteExpired(); err != nil {
+					logger.Warn("Failed to clean expired password resets", "error", err)
+				}
+				if err := emailVerifyRepo.DeleteExpired(); err != nil {
+					logger.Warn("Failed to clean expired email verifications", "error", err)
+				}
+				if err := emailTaskRepo.CleanupOld(7 * 24 * time.Hour); err != nil {
+					logger.Warn("Failed to clean old email tasks", "error", err)
+				}
+				if err := loginLogRepo.CleanupOld(90 * 24 * time.Hour); err != nil {
+					logger.Warn("Failed to clean old login logs", "error", err)
+				}
+				logger.Debug("Data cleanup completed")
+			}
+		}
+	}()
+	printInitStep("✓", "Cleanup", "expired data cleanup task started (every 30min)")
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	startupDuration := time.Since(startTime)
@@ -244,13 +318,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 
-	fmt.Println()
-	fmt.Printf("%s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", colorDim, colorGray, colorReset)
 	fmt.Printf("%s%s ⏳ Shutting down...%s %s(signal: %s)%s\n", colorBold, colorYellow, colorReset, colorGray, sig.String(), colorReset)
-	fmt.Printf("%s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", colorDim, colorGray, colorReset)
-	fmt.Println()
-
-	/* 优雅关停：从配置读取超时时间 */
 	shutdownStart := time.Now()
 	shutdownTimeout := time.Duration(cfg.Server.ShutdownTimeoutSec) * time.Second
 	if shutdownTimeout <= 0 {
@@ -265,9 +333,13 @@ func main() {
 		printInitStep("✓", "HTTP Server", "stopped")
 	}
 
-	/* 停止 Webhook 后台重试 */
-	webhookCancel()
-	printInitStep("✓", "Webhook", "retry worker stopped")
+	/* 停止所有后台任务（Webhook 重试 + Token 清理） */
+	bgCancel()
+	printInitStep("✓", "Background", "all background workers stopped")
+
+	/* 停止邮件队列（等待进行中的任务完成） */
+	routerCleanup()
+	printInitStep("✓", "EmailQueue", "stopped")
 
 	/* 关闭缓存 */
 	if cacheInstance != nil {

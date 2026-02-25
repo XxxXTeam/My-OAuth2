@@ -67,11 +67,11 @@ func (AuthorizationCode) TableName() string {
 type AccessToken struct {
 	ID        uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	Token     string     `gorm:"uniqueIndex;size:500;not null" json:"token"`
-	ClientID  string     `gorm:"size:100;not null;index" json:"client_id"`
-	UserID    *uuid.UUID `gorm:"type:uuid;index" json:"user_id"`
+	ClientID  string     `gorm:"size:100;not null;index:idx_at_client_user,priority:1" json:"client_id"`
+	UserID    *uuid.UUID `gorm:"type:uuid;index:idx_at_client_user,priority:2" json:"user_id"`
 	Scope     string     `gorm:"size:500" json:"scope"`
-	ExpiresAt time.Time  `gorm:"not null" json:"expires_at"`
-	Revoked   bool       `gorm:"default:false" json:"revoked"`
+	ExpiresAt time.Time  `gorm:"not null;index:idx_at_expires" json:"expires_at"`
+	Revoked   bool       `gorm:"default:false;index:idx_at_revoked_expires" json:"revoked"`
 	CreatedAt time.Time  `gorm:"autoCreateTime" json:"created_at"`
 
 	// Relations
@@ -118,10 +118,10 @@ type RefreshToken struct {
 	ID            uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	Token         string     `gorm:"uniqueIndex;size:500;not null" json:"token"`
 	AccessTokenID *uuid.UUID `gorm:"type:uuid;index" json:"access_token_id"`
-	UserID        *uuid.UUID `gorm:"type:uuid;index" json:"user_id"`
-	ExpiresAt     time.Time  `gorm:"not null" json:"expires_at"`
-	Revoked       bool       `gorm:"default:false" json:"revoked"`
-	RevokedAt     *time.Time `gorm:"index" json:"revoked_at,omitempty"`
+	UserID        *uuid.UUID `gorm:"type:uuid;index:idx_rt_user_revoked,priority:1" json:"user_id"`
+	ExpiresAt     time.Time  `gorm:"not null;index:idx_rt_expires" json:"expires_at"`
+	Revoked       bool       `gorm:"default:false;index:idx_rt_user_revoked,priority:2" json:"revoked"`
+	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt     time.Time  `gorm:"autoCreateTime" json:"created_at"`
 
 	// Relations

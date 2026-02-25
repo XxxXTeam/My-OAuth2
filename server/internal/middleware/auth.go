@@ -49,8 +49,14 @@ func authError(c *gin.Context, code, message string) {
  * Auth 创建 JWT 鉴权中间件
  * 支持 Authorization Header 和 httpOnly Cookie 两种方式
  * 使用 ValidateAccessToken 确保 refresh token 不能当 access token 使用
+ * 可选传入 Blacklist 实例，启用 token 吊销检查
  */
-func Auth(jwtManager *jwt.Manager) gin.HandlerFunc {
+func Auth(jwtManager *jwt.Manager, blacklist ...*jwt.Blacklist) gin.HandlerFunc {
+	var bl *jwt.Blacklist
+	if len(blacklist) > 0 {
+		bl = blacklist[0]
+	}
+
 	return func(c *gin.Context) {
 		tokenString := extractToken(c)
 		if tokenString == "" {
@@ -71,6 +77,18 @@ func Auth(jwtManager *jwt.Manager) gin.HandlerFunc {
 			return
 		}
 
+		/* JWT 黑名单检查：JTI 级别吊销 + 用户级别全局吊销 */
+		if bl != nil {
+			if bl.IsRevoked(claims.ID) {
+				authError(c, "TOKEN_REVOKED", "Token has been revoked")
+				return
+			}
+			if claims.IssuedAt != nil && bl.IsUserTokenRevoked(claims.UserID.String(), claims.IssuedAt.Time) {
+				authError(c, "TOKEN_REVOKED", "Token has been revoked")
+				return
+			}
+		}
+
 		ctx.SetUser(c, claims.UserID, claims.Email, claims.Username, claims.Role)
 		c.Next()
 	}
@@ -80,7 +98,12 @@ func Auth(jwtManager *jwt.Manager) gin.HandlerFunc {
  * OptionalAuth 可选鉴权中间件
  * token 有效时设置用户信息，无 token 或无效时不拦截
  */
-func OptionalAuth(jwtManager *jwt.Manager) gin.HandlerFunc {
+func OptionalAuth(jwtManager *jwt.Manager, blacklist ...*jwt.Blacklist) gin.HandlerFunc {
+	var bl *jwt.Blacklist
+	if len(blacklist) > 0 {
+		bl = blacklist[0]
+	}
+
 	return func(c *gin.Context) {
 		tokenString := extractToken(c)
 		if tokenString == "" {
@@ -92,6 +115,14 @@ func OptionalAuth(jwtManager *jwt.Manager) gin.HandlerFunc {
 		if err != nil {
 			c.Next()
 			return
+		}
+
+		/* 黑名单检查（可选） */
+		if bl != nil {
+			if bl.IsRevoked(claims.ID) || (claims.IssuedAt != nil && bl.IsUserTokenRevoked(claims.UserID.String(), claims.IssuedAt.Time)) {
+				c.Next()
+				return
+			}
 		}
 
 		ctx.SetUser(c, claims.UserID, claims.Email, claims.Username, claims.Role)

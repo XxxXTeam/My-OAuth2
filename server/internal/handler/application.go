@@ -5,6 +5,8 @@ import (
 
 	ctx "server/internal/context"
 	"server/internal/service"
+	"server/pkg/audit"
+	"server/pkg/sanitize"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -59,6 +61,10 @@ func (h *ApplicationHandler) CreateApp(c *gin.Context) {
 		return
 	}
 
+	/* 输入清洗：防止 XSS 和控制字符注入 */
+	req.Name = sanitize.StripHTML(req.Name)
+	req.Description = sanitize.StripHTML(req.Description)
+
 	userID, ok := ctx.GetUserID(c)
 	if !ok {
 		Unauthorized(c, "User not authenticated")
@@ -77,6 +83,8 @@ func (h *ApplicationHandler) CreateApp(c *gin.Context) {
 		InternalError(c, "Failed to create application")
 		return
 	}
+
+	audit.Log(audit.ActionAppCreate, audit.ResultSuccess, userID.String(), app.ID.String(), c.ClientIP(), "app_name", app.Name)
 
 	// Return with client_secret (only shown once)
 	Created(c, AppResponse{
@@ -202,6 +210,10 @@ func (h *ApplicationHandler) UpdateApp(c *gin.Context) {
 		return
 	}
 
+	/* 输入清洗：防止 XSS 和控制字符注入 */
+	req.Name = sanitize.StripHTML(req.Name)
+	req.Description = sanitize.StripHTML(req.Description)
+
 	userID, ok := ctx.GetUserID(c)
 	if !ok {
 		Unauthorized(c, "User not authenticated")
@@ -274,6 +286,8 @@ func (h *ApplicationHandler) ResetSecret(c *gin.Context) {
 		return
 	}
 
+	audit.Log(audit.ActionSecretReset, audit.ResultSuccess, userID.String(), app.ID.String(), c.ClientIP(), "app_name", app.Name)
+
 	Success(c, AppResponse{
 		ID:           app.ID.String(),
 		ClientID:     app.ClientID,
@@ -318,6 +332,7 @@ func (h *ApplicationHandler) DeleteApp(c *gin.Context) {
 		return
 	}
 
+	audit.Log(audit.ActionAppDelete, audit.ResultSuccess, userID.String(), id.String(), c.ClientIP())
 	Success(c, gin.H{"message": "Application deleted successfully"})
 }
 

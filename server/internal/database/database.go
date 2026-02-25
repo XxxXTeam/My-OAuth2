@@ -1,43 +1,27 @@
-/*
- * Package database 数据库初始化与管理
- * 功能：数据库连接建立、DSN 自动规范化、Schema 迁移、连接池配置、默认管理员初始化
- *       支持 SQLite（开发）、PostgreSQL（生产）、MySQL（生产）三种驱动
- *
- * 自动迁移表（17 张）：
- *   users, applications, authorization_codes, access_tokens, refresh_tokens,
- *   system_configs, user_authorizations, login_logs, webhooks, webhook_deliveries,
- *   federated_providers, federated_identities, trusted_apps, password_resets,
- *   device_codes, email_verifications, email_tasks
- */
 package database
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
 	"server/internal/config"
 	"server/internal/model"
 	"server/pkg/logger"
+	"server/pkg/password"
 
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-/* DB 全局数据库实例 */
 var DB *gorm.DB
 
-/*
- * normalizeDSN 规范化 DSN，为各驱动自动补全关键参数
- * SQLite:    追加 _busy_timeout / _journal_mode=WAL / _synchronous 等
- * MySQL:     追加 parseTime=true / charset=utf8mb4 / collation / loc 等
- * PostgreSQL: 追加 connect_timeout / statement_timeout 等
- */
 func normalizeDSN(driver, dsn string) string {
 	switch driver {
 	case "sqlite":
@@ -181,8 +165,8 @@ func Init(cfg *config.DatabaseConfig) error {
 		}
 		configureConnectionPool(sqlDB, cfg)
 	}
-	logger.Info("Database migrating...")
-	if err := DB.AutoMigrate(
+	/* 迁移模型列表 */
+	migrationModels := []any{
 		&model.User{},
 		&model.Application{},
 		&model.AuthorizationCode{},
@@ -200,10 +184,19 @@ func Init(cfg *config.DatabaseConfig) error {
 		&model.DeviceCode{},
 		&model.EmailVerification{},
 		&model.EmailTask{},
-	); err != nil {
-		return fmt.Errorf("failed to migrate database: %w", err)
 	}
-	logger.Info("Database migration completed")
+
+	/* 计算 model 结构体指纹，仅在 schema 变化时执行迁移 */
+	if needsMigration(DB, migrationModels) {
+		logger.Info("Database migrating...")
+		if err := DB.AutoMigrate(migrationModels...); err != nil {
+			return fmt.Errorf("failed to migrate database: %w", err)
+		}
+		saveMigrationHash(DB, migrationModels)
+		logger.Info("Database migration completed")
+	} else {
+		logger.Debug("Database schema unchanged, migration skipped")
+	}
 
 	/* 数据清理：将历史数据中 access_token_id = 零值 UUID 的记录置为 NULL，
 	 * 避免开启外键约束后导致异常 */
@@ -272,10 +265,55 @@ func initDefaultAdmin() error {
 	return nil
 }
 
-/* hashPassword 使用 bcrypt 生成密码哈希（cost=12） */
-func hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 12)
-	return string(bytes), err
+/* hashPassword 统一使用 password 包生成哈希，确保 bcrypt cost 与全局一致 */
+func hashPassword(pwd string) (string, error) {
+	return password.Hash(pwd)
+}
+
+/*
+ * computeModelHash 计算所有迁移 model 的结构体指纹
+ * 功能：基于 model 类型名和字段列表生成 SHA256 哈希，用于检测 schema 是否变化
+ */
+func computeModelHash(models []any) string {
+	h := sha256.New()
+	for _, m := range models {
+		t := reflect.TypeOf(m)
+		if t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		h.Write([]byte(t.Name()))
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			h.Write([]byte(f.Name + ":" + f.Type.String() + ":" + string(f.Tag)))
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))[:16]
+}
+
+/*
+ * needsMigration 检查是否需要执行数据库迁移
+ * 功能：对比 system_configs 表中存储的上次迁移哈希与当前 model 哈希
+ *       首次运行或哈希不匹配时返回 true
+ */
+func needsMigration(db *gorm.DB, models []any) bool {
+	currentHash := computeModelHash(models)
+	var stored string
+	/* system_configs 表可能尚不存在（首次启动），此时必须迁移 */
+	err := db.Raw("SELECT value FROM system_configs WHERE key = ?", "_migration_hash").Scan(&stored).Error
+	if err != nil || stored != currentHash {
+		return true
+	}
+	return false
+}
+
+/*
+ * saveMigrationHash 保存迁移哈希到 system_configs 表
+ * 功能：迁移完成后记录当前 model 哈希，下次启动时用于跳过判断
+ */
+func saveMigrationHash(db *gorm.DB, models []any) {
+	hash := computeModelHash(models)
+	db.Exec("INSERT INTO system_configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+		"_migration_hash", hash, hash)
 }
 
 /* GetDB 获取全局数据库实例 */
@@ -297,12 +335,7 @@ func configureConnectionPool(sqlDB *sql.DB, cfg *config.DatabaseConfig) {
 		sqlDB.SetMaxOpenConns(1)
 		sqlDB.SetMaxIdleConns(1)
 		sqlDB.SetConnMaxLifetime(0)
-		DB.Exec("PRAGMA journal_mode=WAL")
-		DB.Exec("PRAGMA synchronous=NORMAL")
-		DB.Exec("PRAGMA cache_size=-64000")
-		DB.Exec("PRAGMA busy_timeout=5000")
 	case "postgres", "mysql":
-		// 从配置读取连接池参数，0 表示使用默认值
 		maxOpen := cfg.MaxOpenConns
 		if maxOpen <= 0 {
 			maxOpen = 25

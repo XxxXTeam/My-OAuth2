@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"server/internal/service"
+	"server/pkg/audit"
 
 	"github.com/gin-gonic/gin"
 )
@@ -129,6 +130,7 @@ func (h *PasswordResetHandler) ResetPassword(c *gin.Context) {
 
 	err := h.resetService.ResetPassword(req.Token, req.NewPassword)
 	if err != nil {
+		audit.Log(audit.ActionPasswordReset, audit.ResultFailure, "anonymous", "unknown", c.ClientIP(), "reason", err.Error())
 		if errors.Is(err, service.ErrResetTokenInvalid) {
 			BadRequest(c, "Invalid or expired reset token")
 			return
@@ -141,6 +143,7 @@ func (h *PasswordResetHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 
+	audit.Log(audit.ActionPasswordReset, audit.ResultSuccess, "anonymous", "token_user", c.ClientIP())
 	Success(c, gin.H{
 		"message": "Password has been reset successfully. You can now login with your new password.",
 	})

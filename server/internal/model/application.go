@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -126,10 +127,25 @@ func (a *Application) SetScopes(scopes []string) {
 
 /*
  * ValidateRedirectURI 校验回调地址是否在允许列表中
+ * 功能：精确匹配 + 安全校验，阻止开放重定向攻击
+ *       - 禁止 javascript:/data: 等危险协议
+ *       - 禁止路径穿越（/../）
+ *       - 禁止带用户信息的 URI（user@host）
  * @param uri  - 待校验的回调 URI
  * @return bool - 在允许列表中返回 true
  */
 func (a *Application) ValidateRedirectURI(uri string) bool {
+	/* 基础安全检查：阻止危险协议和路径穿越 */
+	lower := strings.ToLower(uri)
+	if strings.HasPrefix(lower, "javascript:") ||
+		strings.HasPrefix(lower, "data:") ||
+		strings.HasPrefix(lower, "vbscript:") ||
+		strings.Contains(uri, "/../") ||
+		strings.Contains(uri, "/..\\") ||
+		strings.Contains(uri, "@") {
+		return false
+	}
+
 	for _, allowed := range a.GetRedirectURIs() {
 		if allowed == uri {
 			return true
@@ -244,22 +260,7 @@ func splitScopes(scope string) []string {
 	if scope == "" {
 		return nil
 	}
-	result := []string{}
-	current := ""
-	for _, c := range scope {
-		if c == ' ' {
-			if current != "" {
-				result = append(result, current)
-			}
-			current = ""
-		} else {
-			current += string(c)
-		}
-	}
-	if current != "" {
-		result = append(result, current)
-	}
-	return result
+	return strings.Fields(scope)
 }
 
 /* TableName 指定 GORM 表名为 applications */

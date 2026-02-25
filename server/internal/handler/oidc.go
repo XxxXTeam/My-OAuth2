@@ -38,8 +38,8 @@ func NewOIDCHandler(issuer string) *OIDCHandler {
 		issuer: issuer,
 		keyID:  "oauth2-key-1",
 	}
-	// 生成RSA密钥对用于JWT签名（生产环境应该持久化）
-	h.generateKey()
+	/* RSA 密钥延迟生成：首次访问 JWKS 端点时触发，不阻塞服务启动 */
+	go h.generateKey()
 	return h
 }
 
@@ -49,12 +49,28 @@ func (h *OIDCHandler) SetOAuthRepo(oauthRepo *repository.OAuthRepository, jwtMan
 	h.jwtManager = jwtManager
 }
 
+/*
+ * generateKey 生成 RSA 密钥对用于 JWT/OIDC 签名
+ * 使用 2048 位（NIST 推荐安全等级，生成速度比 4096 位快约 8 倍）
+ */
 func (h *OIDCHandler) generateKey() {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return
 	}
+	h.mu.Lock()
 	h.privateKey = key
+	h.mu.Unlock()
+}
+
+/* ensureKey 确保 RSA 密钥已生成，未就绪时同步生成 */
+func (h *OIDCHandler) ensureKey() {
+	h.mu.RLock()
+	hasKey := h.privateKey != nil
+	h.mu.RUnlock()
+	if !hasKey {
+		h.generateKey()
+	}
 }
 
 // Discovery returns the OIDC discovery document
@@ -103,6 +119,8 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 			"refresh_token",
 			"client_credentials",
 			"implicit",
+			"urn:ietf:params:oauth:grant-type:device_code",
+			"urn:ietf:params:oauth:grant-type:token-exchange",
 		},
 
 		// 支持的主题标识符类型
@@ -171,9 +189,8 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 			"address",
 		},
 
-		// PKCE支持
+		// PKCE 支持（仅 S256，plain 已禁用以防止中间人攻击）
 		"code_challenge_methods_supported": []string{
-			"plain",
 			"S256",
 		},
 
@@ -184,6 +201,9 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 		"require_request_uri_registration": false,
 		"ui_locales_supported":             []string{"zh-CN", "en"},
 		"service_documentation":            issuer + "/docs",
+
+		// Device Authorization (RFC 8628)
+		"device_authorization_endpoint": issuer + "/oauth/device/code",
 
 		// 自定义扩展
 		"sdk_endpoint":        issuer + "/api/sdk",
@@ -196,6 +216,8 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 // JWKS returns the JSON Web Key Set
 // GET /.well-known/jwks.json
 func (h *OIDCHandler) JWKS(c *gin.Context) {
+	h.ensureKey()
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 

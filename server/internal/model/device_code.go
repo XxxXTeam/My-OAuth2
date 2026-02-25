@@ -45,6 +45,7 @@ type DeviceCode struct {
 	Interval                int              `gorm:"default:5" json:"interval"`
 	UserID                  *uuid.UUID       `gorm:"type:uuid;index" json:"user_id"`
 	Status                  DeviceCodeStatus `gorm:"size:20;default:pending" json:"status"`
+	LastPolledAt            *time.Time       `json:"last_polled_at,omitempty"`
 	CreatedAt               time.Time        `gorm:"autoCreateTime" json:"created_at"`
 
 	// Relations

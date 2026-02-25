@@ -184,10 +184,16 @@ export function WebhookManager({ appId }: WebhookManagerProps) {
             <div className="space-y-2">
               <Label>{t('webhooks.url')}</Label>
               <Input
+                type="url"
                 placeholder="https://your-server.com/webhook"
                 value={formData.url}
                 onChange={(e) => setFormData(prev => ({ ...prev, url: e.target.value }))}
+                autoComplete="off"
+                spellCheck={false}
               />
+              {formData.url && !/^https?:\/\/.+/.test(formData.url) && (
+                <p className="text-xs text-red-500">{t('webhooks.urlInvalid') || 'URL must start with http:// or https://'}</p>
+              )}
             </div>
             <div className="space-y-2">
               <Label>{t('webhooks.secret')}</Label>
@@ -196,6 +202,7 @@ export function WebhookManager({ appId }: WebhookManagerProps) {
                 placeholder={t('webhooks.secretPlaceholder')}
                 value={formData.secret}
                 onChange={(e) => setFormData(prev => ({ ...prev, secret: e.target.value }))}
+                autoComplete="new-password"
               />
             </div>
             <div className="space-y-2">
@@ -229,7 +236,7 @@ export function WebhookManager({ appId }: WebhookManagerProps) {
               </div>
             </div>
             <div className="flex gap-2">
-              <Button onClick={handleSubmit} disabled={isSaving}>
+              <Button onClick={handleSubmit} disabled={isSaving || !formData.url || !/^https?:\/\/.+/.test(formData.url) || formData.events.length === 0}>
                 {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                 {t('common.save')}
               </Button>

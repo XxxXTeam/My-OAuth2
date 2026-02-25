@@ -20,6 +20,8 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrEmailExists        = errors.New("email already exists")
 	ErrUsernameExists     = errors.New("username already exists")
+	ErrPasswordTooWeak    = errors.New("password does not meet strength requirements")
+	ErrAccountLocked      = errors.New("account temporarily locked due to too many failed attempts")
 )
 
 /*
@@ -28,11 +30,12 @@ var (
  *       支持 Refresh Token Rotation 安全机制
  */
 type AuthService struct {
-	userRepo     *repository.UserRepository
-	loginLogRepo *repository.LoginLogRepository
-	oauthRepo    *repository.OAuthRepository
-	jwtManager   *jwt.Manager
-	config       *config.Config
+	userRepo       *repository.UserRepository
+	loginLogRepo   *repository.LoginLogRepository
+	oauthRepo      *repository.OAuthRepository
+	jwtManager     *jwt.Manager
+	config         *config.Config
+	tokenBlacklist *jwt.Blacklist
 }
 
 /*
@@ -54,6 +57,11 @@ func NewAuthService(userRepo *repository.UserRepository, loginLogRepo *repositor
 /* SetOAuthRepo 注入 OAuthRepository（启用 Refresh Token Rotation） */
 func (s *AuthService) SetOAuthRepo(repo *repository.OAuthRepository) {
 	s.oauthRepo = repo
+}
+
+/* SetTokenBlacklist 注入 JWT 黑名单（启用 access token 即时吊销） */
+func (s *AuthService) SetTokenBlacklist(bl *jwt.Blacklist) {
+	s.tokenBlacklist = bl
 }
 
 /* GetJWTManager 返回 JWT 管理器（用于 Logout 等场景解析 token） */
@@ -91,6 +99,11 @@ type AuthTokens struct {
  * @return *model.User - 创建后的用户实体
  */
 func (s *AuthService) Register(input *RegisterInput) (*model.User, error) {
+	/* 校验密码强度（长度、bcrypt 72 字节限制） */
+	if err := password.ValidateStrength(input.Password); err != nil {
+		return nil, ErrPasswordTooWeak
+	}
+
 	// Check if email exists
 	exists, err := s.userRepo.ExistsByEmail(input.Email)
 	if err != nil {
@@ -148,6 +161,16 @@ func (s *AuthService) Register(input *RegisterInput) (*model.User, error) {
  * @return *model.User   - 用户实体
  * @return *AuthTokens   - JWT 令牌对
  */
+/*
+ * 账户锁定策略常量
+ * MaxFailedLogins: 连续失败次数阈值
+ * LockDuration:    锁定持续时间
+ */
+const (
+	MaxFailedLogins = 5
+	LockDuration    = 15 * time.Minute
+)
+
 func (s *AuthService) Login(input *LoginInput) (*model.User, *AuthTokens, error) {
 	// Find user by email
 	user, err := s.userRepo.FindByEmail(input.Email)
@@ -162,13 +185,58 @@ func (s *AuthService) Login(input *LoginInput) (*model.User, *AuthTokens, error)
 		return nil, nil, err
 	}
 
+	/* 用户状态检查：suspended/disabled 用户拒绝登录 */
+	if user.Status != "" && user.Status != "active" {
+		if s.loginLogRepo != nil {
+			s.loginLogRepo.CreateLoginLog(&user.ID, nil, model.LoginTypeDirect, input.IPAddress, input.UserAgent, input.Email, false, "user "+user.Status)
+		}
+		return nil, nil, ErrInvalidCredentials
+	}
+
+	/* 账户锁定检查：连续失败超过阈值后临时锁定 */
+	if user.LockedUntil != nil && time.Now().Before(*user.LockedUntil) {
+		if s.loginLogRepo != nil {
+			s.loginLogRepo.CreateLoginLog(&user.ID, nil, model.LoginTypeDirect, input.IPAddress, input.UserAgent, input.Email, false, "account locked")
+		}
+		return nil, nil, ErrAccountLocked
+	}
+
 	// Verify password
 	if !password.Verify(input.Password, user.PasswordHash) {
+		/* 递增失败计数，达到阈值时锁定账户 */
+		user.FailedLogins++
+		if user.FailedLogins >= MaxFailedLogins {
+			lockUntil := time.Now().Add(LockDuration)
+			user.LockedUntil = &lockUntil
+		}
+		s.userRepo.Update(user)
+
 		// Log failed login attempt (wrong password)
 		if s.loginLogRepo != nil {
 			s.loginLogRepo.CreateLoginLog(&user.ID, nil, model.LoginTypeDirect, input.IPAddress, input.UserAgent, input.Email, false, "invalid password")
 		}
 		return nil, nil, ErrInvalidCredentials
+	}
+
+	/* 登录成功：重置失败计数和锁定状态 */
+	needsUpdate := user.FailedLogins > 0 || user.LockedUntil != nil
+	if user.FailedLogins > 0 || user.LockedUntil != nil {
+		user.FailedLogins = 0
+		user.LockedUntil = nil
+		needsUpdate = true
+	}
+
+	/* bcrypt cost 自适应升级：旧哈希使用较低 cost 时透明重哈希 */
+	if password.NeedsRehash(user.PasswordHash) {
+		if newHash, hashErr := password.Hash(input.Password); hashErr == nil {
+			user.PasswordHash = newHash
+			needsUpdate = true
+			logger.Info("Password rehashed with updated cost", "user_id", user.ID)
+		}
+	}
+
+	if needsUpdate {
+		s.userRepo.Update(user)
 	}
 
 	// Log successful login
@@ -241,6 +309,10 @@ func (s *AuthService) RefreshTokens(refreshToken string) (*AuthTokens, error) {
 func (s *AuthService) LogoutUser(userID uuid.UUID) {
 	if s.oauthRepo != nil {
 		_ = s.oauthRepo.RevokeUserAuthRefreshTokens(userID)
+	}
+	/* 吊销该用户所有已签发的 access token（基于用户级别时间戳） */
+	if s.tokenBlacklist != nil {
+		_ = s.tokenBlacklist.RevokeAllForUser(userID.String(), s.config.JWT.AccessTokenTTL)
 	}
 }
 
@@ -365,6 +437,11 @@ func (s *AuthService) ChangePassword(userID uuid.UUID, oldPassword, newPassword 
 		}
 	}
 
+	/* 校验新密码强度 */
+	if err := password.ValidateStrength(newPassword); err != nil {
+		return ErrPasswordTooWeak
+	}
+
 	/* 生成新密码哈希 */
 	hashedPassword, err := password.Hash(newPassword)
 	if err != nil {
@@ -380,7 +457,47 @@ func (s *AuthService) ChangePassword(userID uuid.UUID, oldPassword, newPassword 
 	if s.oauthRepo != nil {
 		_ = s.oauthRepo.RevokeUserAuthRefreshTokens(userID)
 	}
+	/* 同时吊销所有已签发的 access token（基于用户级别时间戳） */
+	if s.tokenBlacklist != nil {
+		_ = s.tokenBlacklist.RevokeAllForUser(userID.String(), s.config.JWT.AccessTokenTTL)
+	}
 	return nil
+}
+
+/*
+ * DeleteAccount 用户自助删除账号 (GDPR 合规)
+ * 功能：验证密码后永久删除用户数据，撤销所有 token 和授权
+ * @param userID   - 用户 UUID
+ * @param password - 当前密码（社交登录用户可为空）
+ */
+func (s *AuthService) DeleteAccount(userID uuid.UUID, pwd string) error {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return err
+	}
+
+	/* 密码校验：有密码的用户必须验证（社交登录用户无密码可跳过） */
+	if user.PasswordHash != "" {
+		if pwd == "" {
+			return ErrInvalidCredentials
+		}
+		if !password.Verify(pwd, user.PasswordHash) {
+			return ErrInvalidCredentials
+		}
+	}
+
+	/* 撤销所有 refresh token */
+	if s.oauthRepo != nil {
+		_ = s.oauthRepo.RevokeUserAuthRefreshTokens(userID)
+	}
+
+	/* 吊销所有 access token（JWT 黑名单） */
+	if s.tokenBlacklist != nil {
+		_ = s.tokenBlacklist.RevokeAllForUser(userID.String(), s.config.JWT.AccessTokenTTL)
+	}
+
+	/* 永久删除用户记录 */
+	return s.userRepo.Delete(userID)
 }
 
 /*

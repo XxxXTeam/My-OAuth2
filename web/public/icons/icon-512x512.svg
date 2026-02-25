@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#2563eb"/>
+  <path d="M256 96c-88.366 0-160 71.634-160 160s71.634 160 160 160 160-71.634 160-160-71.634-160-160-160zm0 48c61.856 0 112 50.144 112 112s-50.144 112-112 112-112-50.144-112-112 50.144-112 112-112z" fill="white" opacity="0.3"/>
+  <path d="M256 144c-61.856 0-112 50.144-112 112h48c0-35.346 28.654-64 64-64s64 28.654 64 64h48c0-61.856-50.144-112-112-112z" fill="white"/>
+  <rect x="232" y="248" width="48" height="80" rx="12" fill="white"/>
+  <text x="256" y="424" text-anchor="middle" font-family="system-ui" font-size="56" font-weight="700" fill="white">OAuth2</text>
+</svg>

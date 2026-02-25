@@ -14,7 +14,11 @@ import (
  * - X-XSS-Protection: 启用浏览器 XSS 过滤
  * - Referrer-Policy: 控制 Referer 泄露
  * - Permissions-Policy: 限制浏览器特性
+ * - Strict-Transport-Security: 强制 HTTPS（HSTS）
+ * - Content-Security-Policy: 限制资源加载来源
  * - Cache-Control: API 响应不缓存敏感数据
+ * - X-Permitted-Cross-Domain-Policies: 阻止 Adobe Flash/PDF 跨域策略
+ * - Cross-Origin-Opener-Policy: 防止跨源窗口引用
  */
 func SecurityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -22,7 +26,26 @@ func SecurityHeaders() gin.HandlerFunc {
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("X-XSS-Protection", "1; mode=block")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
-		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()")
+
+		/* HSTS: 强制 HTTPS，max-age=1年，包含子域 */
+		if c.GetHeader("X-Forwarded-Proto") == "https" || c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+		}
+
+		/*
+		 * CSP: 限制资源来源
+		 * script-src 'unsafe-inline': Next.js SSR 和暗黑模式初始化脚本需要内联执行
+		 * style-src 'unsafe-inline': SPA 动态样式需要
+		 * img-src https:: 允许外部头像和 OAuth 提供商图标
+		 */
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+
+		/* 阻止 Adobe 跨域策略文件 */
+		c.Header("X-Permitted-Cross-Domain-Policies", "none")
+
+		/* 防止跨源窗口引用泄露 */
+		c.Header("Cross-Origin-Opener-Policy", "same-origin")
 
 		/* API 响应禁止缓存敏感数据 */
 		path := c.Request.URL.Path

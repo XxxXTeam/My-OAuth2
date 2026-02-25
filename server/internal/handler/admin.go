@@ -4,12 +4,17 @@ import (
 	crand "crypto/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	ctx "server/internal/context"
 	"server/internal/model"
 	"server/internal/repository"
 	"server/internal/service"
+	"server/pkg/audit"
 	"server/pkg/email"
+	"server/pkg/password"
+	"server/pkg/sanitize"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -142,7 +147,11 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 	})
 }
 
-// GetUser returns a single user by ID (admin only)
+/*
+ * GetUser 获取单个用户详情（管理员专用）
+ * 功能：返回结构化响应，隐藏 password_hash 等敏感字段
+ * @route GET /api/admin/users/:id
+ */
 func (h *AdminHandler) GetUser(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
@@ -157,7 +166,8 @@ func (h *AdminHandler) GetUser(c *gin.Context) {
 		return
 	}
 
-	Success(c, user)
+	/* 返回结构化响应，避免直接序列化 model 暴露 json:"-" 以外的内部字段 */
+	Success(c, buildFullUserResponse(user))
 }
 
 // UpdateUserRole updates a user's role (admin only)
@@ -178,15 +188,27 @@ func (h *AdminHandler) UpdateUserRole(c *gin.Context) {
 		return
 	}
 
+	oldUser, _ := h.userRepo.FindByID(id)
+	oldRole := ""
+	if oldUser != nil {
+		oldRole = string(oldUser.Role)
+	}
+
 	if err := h.userRepo.UpdateRole(id, model.UserRole(input.Role)); err != nil {
 		InternalError(c, "Failed to update role")
 		return
 	}
 
+	actorID := getActorID(c)
+	audit.Log(audit.ActionRoleChange, audit.ResultSuccess, actorID, id.String(), c.ClientIP(), "old_role", oldRole, "new_role", input.Role)
 	Success(c, gin.H{"message": "Role updated successfully"})
 }
 
-// DeleteUser deletes a user (admin only)
+/*
+ * DeleteUser 删除单个用户（管理员专用）
+ * 安全：禁止管理员删除自己的账号
+ * @route DELETE /api/admin/users/:id
+ */
 func (h *AdminHandler) DeleteUser(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
@@ -195,11 +217,21 @@ func (h *AdminHandler) DeleteUser(c *gin.Context) {
 		return
 	}
 
+	/* 自删保护：禁止删除当前登录的管理员账号 */
+	if currentUserID, exists := c.Get("user_id"); exists {
+		if cuid, ok := currentUserID.(uuid.UUID); ok && cuid == id {
+			BadRequest(c, "Cannot delete your own account")
+			return
+		}
+	}
+
 	if err := h.userRepo.Delete(id); err != nil {
 		InternalError(c, "Failed to delete user")
 		return
 	}
 
+	actorID := getActorID(c)
+	audit.Log(audit.ActionAccountDelete, audit.ResultSuccess, actorID, id.String(), c.ClientIP())
 	Success(c, gin.H{"message": "User deleted successfully"})
 }
 
@@ -221,18 +253,32 @@ func (h *AdminHandler) ResetUserPassword(c *gin.Context) {
 		return
 	}
 
+	/* 校验新密码强度（含常见弱密码黑名单） */
+	if err := password.ValidateStrength(input.NewPassword); err != nil {
+		BadRequest(c, err.Error())
+		return
+	}
+
 	user, err := h.userRepo.FindByID(id)
 	if err != nil {
 		NotFound(c, "User not found")
 		return
 	}
 
-	user.SetPassword(input.NewPassword)
+	if err := user.SetPassword(input.NewPassword); err != nil {
+		InternalError(c, "Failed to hash password")
+		return
+	}
+	/* 重置失败计数和锁定状态 */
+	user.FailedLogins = 0
+	user.LockedUntil = nil
 	if err := h.userRepo.Update(user); err != nil {
 		InternalError(c, "Failed to reset password")
 		return
 	}
 
+	actorID := getActorID(c)
+	audit.Log(audit.ActionPasswordReset, audit.ResultSuccess, actorID, id.String(), c.ClientIP())
 	Success(c, gin.H{"message": "Password reset successfully"})
 }
 
@@ -260,12 +306,15 @@ func (h *AdminHandler) UpdateUserStatus(c *gin.Context) {
 		return
 	}
 
+	oldStatus := user.Status
 	user.Status = input.Status
 	if err := h.userRepo.Update(user); err != nil {
 		InternalError(c, "Failed to update status")
 		return
 	}
 
+	actorID := getActorID(c)
+	audit.Log(audit.ActionStatusChange, audit.ResultSuccess, actorID, id.String(), c.ClientIP(), "old_status", oldStatus, "new_status", input.Status)
 	Success(c, gin.H{"message": "User status updated successfully"})
 }
 
@@ -483,8 +532,11 @@ type BatchDeleteRequest struct {
 	UserIDs []string `json:"user_ids" binding:"required,min=1"`
 }
 
-// BatchDeleteUsers deletes multiple users
-// DELETE /api/admin/users/batch
+/*
+ * BatchDeleteUsers 批量删除用户（管理员专用）
+ * 安全：禁止管理员删除自己的账号
+ * @route DELETE /api/admin/users/batch
+ */
 func (h *AdminHandler) BatchDeleteUsers(c *gin.Context) {
 	var req BatchDeleteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -492,12 +544,22 @@ func (h *AdminHandler) BatchDeleteUsers(c *gin.Context) {
 		return
 	}
 
+	/* 获取当前管理员 ID，用于自删保护 */
+	currentUserID, _ := c.Get("user_id")
+
 	// Parse UUIDs
 	ids := make([]uuid.UUID, 0, len(req.UserIDs))
 	for _, idStr := range req.UserIDs {
 		id, err := uuid.Parse(idStr)
 		if err != nil {
 			continue
+		}
+		/* 禁止管理员删除自己 */
+		if currentUserID != nil {
+			if cuid, ok := currentUserID.(uuid.UUID); ok && cuid == id {
+				BadRequest(c, "Cannot delete your own account")
+				return
+			}
 		}
 		ids = append(ids, id)
 	}
@@ -512,6 +574,11 @@ func (h *AdminHandler) BatchDeleteUsers(c *gin.Context) {
 	if err != nil {
 		InternalError(c, "Failed to delete users")
 		return
+	}
+
+	actorID := getActorID(c)
+	for _, id := range ids {
+		audit.Log(audit.ActionAccountDelete, audit.ResultSuccess, actorID, id.String(), c.ClientIP(), "batch", "true")
 	}
 
 	Success(c, gin.H{
@@ -540,23 +607,28 @@ func (h *AdminHandler) ExportUsers(c *gin.Context) {
 
 	if format == "csv" {
 		// Export as CSV
-		c.Header("Content-Type", "text/csv")
+		c.Header("Content-Type", "text/csv; charset=utf-8")
 		c.Header("Content-Disposition", "attachment; filename=users.csv")
 
-		// Write CSV header
+		/* BOM 头确保 Excel 正确识别 UTF-8 */
+		c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
 		c.Writer.WriteString("id,email,username,role,status,email_verified,created_at\n")
 
-		// Write CSV rows
 		for _, u := range users {
 			status := u.Status
 			if status == "" {
 				status = "active"
 			}
-			line := u.ID.String() + "," +
-				u.Email + "," +
-				u.Username + "," +
-				string(u.Role) + "," +
-				status + "," +
+			/*
+			 * CSV 字段转义：
+			 * - 包含逗号、引号、换行的字段用双引号包裹
+			 * - 以 =、+、-、@ 开头的字段前加单引号（防 CSV 公式注入）
+			 */
+			line := csvEscape(u.ID.String()) + "," +
+				csvEscape(u.Email) + "," +
+				csvEscape(u.Username) + "," +
+				csvEscape(string(u.Role)) + "," +
+				csvEscape(status) + "," +
 				strconv.FormatBool(u.EmailVerified) + "," +
 				u.CreatedAt.Format(time.RFC3339) + "\n"
 			c.Writer.WriteString(line)
@@ -626,24 +698,33 @@ func (h *AdminHandler) ImportUsers(c *gin.Context) {
 	errors := []string{}
 
 	for _, userData := range req.Users {
-		// Check if user already exists
-		if _, err := h.userRepo.FindByEmail(userData.Email); err == nil {
+		/* 输入清洗：邮箱转小写去空白，用户名校验合法性 */
+		cleanEmail := sanitize.Email(userData.Email)
+		cleanUsername, validUsername := sanitize.Username(userData.Username)
+		if !validUsername {
 			skipped++
-			errors = append(errors, "User with email "+userData.Email+" already exists")
+			errors = append(errors, "Invalid username for "+cleanEmail)
+			continue
+		}
+
+		// Check if user already exists
+		if _, err := h.userRepo.FindByEmail(cleanEmail); err == nil {
+			skipped++
+			errors = append(errors, "User with email "+cleanEmail+" already exists")
 			continue
 		}
 
 		// Create user
 		user := &model.User{
-			Email:       userData.Email,
-			Username:    userData.Username,
+			Email:       cleanEmail,
+			Username:    cleanUsername,
 			Role:        model.RoleUser,
 			Status:      "active",
-			Nickname:    userData.Nickname,
-			PhoneNumber: userData.PhoneNumber,
-			Company:     userData.Company,
-			Department:  userData.Department,
-			JobTitle:    userData.JobTitle,
+			Nickname:    sanitize.PlainText(userData.Nickname, 100),
+			PhoneNumber: sanitize.String(userData.PhoneNumber, 30),
+			Company:     sanitize.PlainText(userData.Company, 200),
+			Department:  sanitize.PlainText(userData.Department, 200),
+			JobTitle:    sanitize.PlainText(userData.JobTitle, 200),
 		}
 
 		if userData.Role != "" {
@@ -653,12 +734,16 @@ func (h *AdminHandler) ImportUsers(c *gin.Context) {
 			user.Status = userData.Status
 		}
 
-		// Set password (generate random if not provided)
-		password := userData.Password
-		if password == "" {
-			password = generateRandomPassword(12)
+		/* 设置密码：未提供则生成随机密码，提供则校验强度 */
+		pwd := userData.Password
+		if pwd == "" {
+			pwd = generateRandomPassword(16)
+		} else if err := password.ValidateStrength(pwd); err != nil {
+			skipped++
+			errors = append(errors, "Weak password for "+cleanEmail+": "+err.Error())
+			continue
 		}
-		user.SetPassword(password)
+		user.SetPassword(pwd)
 
 		if err := h.userRepo.Create(user); err != nil {
 			skipped++
@@ -675,6 +760,37 @@ func (h *AdminHandler) ImportUsers(c *gin.Context) {
 		"skipped": skipped,
 		"errors":  errors,
 	})
+}
+
+/*
+ * csvEscape CSV 字段安全转义
+ * 功能：防止 CSV 注入攻击（公式注入）和字段分隔符冲突
+ * 规则：
+ *   - 以 =、+、-、@、\t、\r 开头的字段前加单引号（阻止 Excel 公式执行）
+ *   - 包含逗号、双引号、换行的字段用双引号包裹
+ */
+func csvEscape(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	/* 防止 CSV 公式注入 */
+	first := s[0]
+	if first == '=' || first == '+' || first == '-' || first == '@' || first == '\t' || first == '\r' {
+		s = "'" + s
+	}
+	/* 包含特殊字符时用双引号包裹 */
+	needsQuote := false
+	for _, c := range s {
+		if c == ',' || c == '"' || c == '\n' || c == '\r' {
+			needsQuote = true
+			break
+		}
+	}
+	if needsQuote {
+		escaped := strings.ReplaceAll(s, "\"", "\"\"")
+		return "\"" + escaped + "\""
+	}
+	return s
 }
 
 /*
@@ -894,6 +1010,16 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 		return
 	}
 
+	/* 输入清洗 */
+	req.Email = sanitize.Email(req.Email)
+	if u, ok := sanitize.Username(req.Username); ok {
+		req.Username = u
+	} else {
+		BadRequest(c, "Invalid username format")
+		return
+	}
+	req.Nickname = sanitize.PlainText(req.Nickname, 100)
+
 	// 检查 email 和 username 是否已存在
 	if _, err := h.userRepo.FindByEmail(req.Email); err == nil {
 		Conflict(c, "Email already exists")
@@ -922,11 +1048,15 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 		user.Status = req.Status
 	}
 
-	password := req.Password
-	if password == "" {
-		password = generateRandomPassword(12)
+	/* 设置密码：未提供则生成随机密码，提供则校验强度 */
+	pwd := req.Password
+	if pwd == "" {
+		pwd = generateRandomPassword(16)
+	} else if err := password.ValidateStrength(pwd); err != nil {
+		BadRequest(c, err.Error())
+		return
 	}
-	user.SetPassword(password)
+	user.SetPassword(pwd)
 
 	if err := h.userRepo.Create(user); err != nil {
 		InternalError(c, "Failed to create user: "+err.Error())
@@ -950,9 +1080,11 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 	}
 	// 如果密码是自动生成的，返回给管理员
 	if req.Password == "" {
-		response["generated_password"] = password
+		response["generated_password"] = pwd
 	}
 
+	actorID := getActorID(c)
+	audit.Log(audit.ActionAccountCreate, audit.ResultSuccess, actorID, user.ID.String(), c.ClientIP(), "email", user.Email)
 	Created(c, response)
 }
 
@@ -1019,29 +1151,30 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 	if req.Status != nil {
 		user.Status = *req.Status
 	}
+	/* 输入清洗：对文本字段进行 HTML 剥离和长度截断 */
 	if req.Nickname != nil {
-		user.Nickname = *req.Nickname
+		user.Nickname = sanitize.PlainText(*req.Nickname, 100)
 	}
 	if req.GivenName != nil {
-		user.GivenName = *req.GivenName
+		user.GivenName = sanitize.PlainText(*req.GivenName, 100)
 	}
 	if req.FamilyName != nil {
-		user.FamilyName = *req.FamilyName
+		user.FamilyName = sanitize.PlainText(*req.FamilyName, 100)
 	}
 	if req.PhoneNumber != nil {
-		user.PhoneNumber = *req.PhoneNumber
+		user.PhoneNumber = sanitize.String(*req.PhoneNumber, 30)
 	}
 	if req.Gender != nil {
-		user.Gender = *req.Gender
+		user.Gender = sanitize.String(*req.Gender, 20)
 	}
 	if req.Company != nil {
-		user.Company = *req.Company
+		user.Company = sanitize.PlainText(*req.Company, 200)
 	}
 	if req.Department != nil {
-		user.Department = *req.Department
+		user.Department = sanitize.PlainText(*req.Department, 200)
 	}
 	if req.JobTitle != nil {
-		user.JobTitle = *req.JobTitle
+		user.JobTitle = sanitize.PlainText(*req.JobTitle, 200)
 	}
 	if req.EmailVerified != nil {
 		user.EmailVerified = *req.EmailVerified
@@ -1052,7 +1185,24 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 		return
 	}
 
-	Success(c, gin.H{"message": "User updated successfully", "user": user})
+	/* 角色或状态变更时记录审计日志 */
+	if req.Role != nil || req.Status != nil || req.Email != nil {
+		actorID := getActorID(c)
+		extra := []any{}
+		if req.Role != nil {
+			extra = append(extra, "new_role", *req.Role)
+		}
+		if req.Status != nil {
+			extra = append(extra, "new_status", *req.Status)
+		}
+		if req.Email != nil {
+			extra = append(extra, "new_email", *req.Email)
+		}
+		audit.Log(audit.ActionStatusChange, audit.ResultSuccess, actorID, id.String(), c.ClientIP(), extra...)
+	}
+
+	/* 返回结构化响应，避免直接序列化 model 暴露内部字段 */
+	Success(c, gin.H{"message": "User updated successfully", "user": buildFullUserResponse(user)})
 }
 
 // SendResetEmail 管理员主动向用户发送密码重置邮件
@@ -1085,6 +1235,38 @@ func (h *AdminHandler) SendResetEmail(c *gin.Context) {
 	Success(c, gin.H{"message": "Password reset email has been queued"})
 }
 
+/*
+ * UnlockUser 管理员解锁用户账户
+ * @route POST /api/admin/users/:id/unlock
+ * 功能：重置登录失败计数和锁定状态，允许用户立即登录
+ */
+func (h *AdminHandler) UnlockUser(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	user, err := h.userRepo.FindByID(id)
+	if err != nil {
+		NotFound(c, "User not found")
+		return
+	}
+
+	user.FailedLogins = 0
+	user.LockedUntil = nil
+
+	if err := h.userRepo.Update(user); err != nil {
+		InternalError(c, "Failed to unlock user")
+		return
+	}
+
+	actorID := getActorID(c)
+	audit.Log(audit.ActionAccountUnlock, audit.ResultSuccess, actorID, id.String(), c.ClientIP())
+	Success(c, gin.H{"message": "User account unlocked successfully"})
+}
+
 // RevokeAppAuthorizations revokes all authorizations for an app
 // DELETE /api/admin/apps/:id/authorizations
 func (h *AdminHandler) RevokeAppAuthorizations(c *gin.Context) {
@@ -1101,8 +1283,19 @@ func (h *AdminHandler) RevokeAppAuthorizations(c *gin.Context) {
 		return
 	}
 
+	actorID := getActorID(c)
+	audit.Log(audit.ActionTokenRevoke, audit.ResultSuccess, actorID, id.String(), c.ClientIP(), "revoked_count", deleted)
+
 	Success(c, gin.H{
 		"message": "All authorizations for app revoked",
 		"revoked": deleted,
 	})
+}
+
+/* getActorID 从 Gin 上下文提取当前操作者（管理员）的 ID */
+func getActorID(c *gin.Context) string {
+	if uid, ok := ctx.GetUserID(c); ok {
+		return uid.String()
+	}
+	return "unknown"
 }

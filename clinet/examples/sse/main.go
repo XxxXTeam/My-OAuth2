@@ -121,7 +121,8 @@ func main() {
 
 // showManualExample 展示手动控制 SSE 连接的方式
 func showManualExample() {
-	fmt.Println(`
+	//nolint:govet // 原始字符串中的 % 占位符是示例代码，非 fmt 格式指令
+	exampleCode := `
 // 手动控制模式示例代码：
 
 sseClient := client.NewSSEClient()
@@ -139,14 +140,16 @@ for {
         if !ok {
             return // channel 关闭
         }
-        fmt.Printf("事件: %s, 用户: %s\n", event.Type, event.Username)
+        fmt.Printf("事件: %%s, 用户: %%s\n", event.Type, event.Username)
     case err := <-sseClient.Errors():
-        fmt.Printf("错误: %v\n", err)
+        fmt.Printf("错误: %%v\n", err)
         return
     case <-ctx.Done():
         return
     }
-}`)
+}
+`
+	fmt.Print(exampleCode)
 }
 
 func getEnv(key, fallback string) string {

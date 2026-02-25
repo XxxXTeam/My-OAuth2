@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"server/internal/config"
+	ctx "server/internal/context"
+	"server/pkg/audit"
 
 	"github.com/gin-gonic/gin"
 )
@@ -273,6 +275,12 @@ func (h *SystemConfigHandler) UpdateConfig(c *gin.Context) {
 	// 重新计算时间 duration，确保内存中的 TTL 立即生效
 	h.cfg.ComputeDurations()
 
+	actorIDCfg := "unknown"
+	if uid, ok := ctx.GetUserID(c); ok {
+		actorIDCfg = uid.String()
+	}
+	audit.Log(audit.ActionConfigChange, audit.ResultSuccess, actorIDCfg, "system", c.ClientIP())
+
 	Success(c, gin.H{
 		"message": "Configuration updated successfully. Some changes may require server restart.",
 	})
@@ -287,6 +295,12 @@ func (h *SystemConfigHandler) RegenerateJWTSecret(c *gin.Context) {
 		InternalError(c, "Failed to save configuration")
 		return
 	}
+
+	actorID := "unknown"
+	if uid, ok := ctx.GetUserID(c); ok {
+		actorID = uid.String()
+	}
+	audit.Log(audit.ActionJWTSecretRotate, audit.ResultSuccess, actorID, "system", c.ClientIP())
 
 	Success(c, gin.H{
 		"message": "JWT secret regenerated. All existing tokens will be invalidated. Server restart recommended.",

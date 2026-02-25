@@ -228,9 +228,15 @@ client.SetTokenStore(&RedisTokenStore{...})
 | `RegisterUser(ctx, req)` | SDK 直接注册用户 |
 | `LoginUser(ctx, req)` | SDK 直接登录用户 |
 | `SyncUser(ctx, req)` | 同步用户（自动注册或登录） |
+| `BatchSyncUsers(ctx, users)` | 批量同步用户 |
+| `GetUserByEmail(ctx, email)` | 通过邮箱查询用户 |
 | `ValidateUserToken(ctx, token)` | 验证用户 Token |
 | `SignToken(ctx, req)` | 签发自定义 Token |
+| `HealthCheck(ctx)` | 检查服务端连通性和健康状态 |
+| `RevokeToken(ctx, hint)` | 撤销令牌 |
+| `IntrospectToken(ctx, token, hint)` | Token 内省查询 |
 | `SetLogger(logger)` | 设置自定义日志 |
+| `Close()` | 关闭客户端，释放后台资源 |
 
 ---
 

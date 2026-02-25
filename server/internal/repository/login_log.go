@@ -255,6 +255,16 @@ func (r *LoginLogRepository) GetFailedLoginAttempts(ipAddress string, duration t
 }
 
 /*
+ * CleanupOld 清理超过指定天数的旧登录日志
+ * 功能：防止 login_logs 表无限增长，保留最近 N 天的日志
+ * @param olderThan - 保留时长（超过此时长的日志将被删除）
+ */
+func (r *LoginLogRepository) CleanupOld(olderThan time.Duration) error {
+	cutoff := time.Now().Add(-olderThan)
+	return r.db.Where("created_at < ?", cutoff).Delete(&model.LoginLog{}).Error
+}
+
+/*
  * FindRecentByUserID 查找用户的最近登录日志
  * @param userID - 用户 UUID
  * @param limit  - 最大返回数量

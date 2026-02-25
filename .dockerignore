@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 构建产物（Docker 内重新构建）
+bin/
+web/.next/
+web/out/
+web/node_modules/
+server/web/dist/*
+!server/web/dist/.gitkeep
+
+# 数据文件
+server/data/*.db
+server/data/*.db-*
+server/data/config.json
+*.log
+logs/
+
+# 密钥文件
+*.pem
+*.key
+*.p12
+
+# 测试和文档
+*.md
+LICENSE

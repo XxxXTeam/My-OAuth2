@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth-context';
@@ -11,24 +11,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Loader2, Mail, Lock, User, Shield, AlertCircle, ArrowRight, CheckCircle, XCircle, Ban } from 'lucide-react';
+import { Loader2, Mail, Lock, User, Shield, AlertCircle, ArrowRight, CheckCircle, XCircle, Ban, Eye, EyeOff } from 'lucide-react';
 import { ProviderIcon } from '@/components/provider-icon';
+import { PasswordStrength } from '@/components/ui/password-strength';
 import type { FederationProvider, SocialProvider } from '@/lib/types';
-
-/* 密码强度计算 */
-function getPasswordStrength(password: string): { level: 0 | 1 | 2 | 3; color: string } {
-  if (!password) return { level: 0, color: '' };
-  let score = 0;
-  if (password.length >= 8) score++;
-  if (/[A-Z]/.test(password) && /[a-z]/.test(password)) score++;
-  if (/[0-9]/.test(password)) score++;
-  if (/[^A-Za-z0-9]/.test(password)) score++;
-  if (password.length >= 12) score++;
-
-  if (score <= 1) return { level: 1, color: 'bg-red-500' };
-  if (score <= 3) return { level: 2, color: 'bg-yellow-500' };
-  return { level: 3, color: 'bg-green-500' };
-}
 
 function RegisterForm() {
   const router = useRouter();
@@ -40,6 +26,8 @@ function RegisterForm() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [registrationAllowed, setRegistrationAllowed] = useState<boolean | null>(null);
@@ -58,13 +46,6 @@ function RegisterForm() {
     }
   }, [authLoading, isAuthenticated, returnTo, router]);
 
-  const passwordStrength = useMemo(() => getPasswordStrength(password), [password]);
-  const strengthLabels = [
-    '',
-    t('auth.register.weak'),
-    t('auth.register.medium'),
-    t('auth.register.strong'),
-  ];
 
   /* 加载可用的第三方登录提供商 */
   useEffect(() => {
@@ -279,6 +260,7 @@ function RegisterForm() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="email"
                   required
                   disabled={isLoading}
                 />
@@ -295,6 +277,7 @@ function RegisterForm() {
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="username"
                   required
                   minLength={3}
                   maxLength={50}
@@ -308,29 +291,28 @@ function RegisterForm() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   id="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  className="pl-10 pr-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="new-password"
                   required
                   minLength={8}
                   disabled={isLoading}
                 />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
               </div>
-              {/* 密码强度指示器 */}
-              {password && (
-                <div className="space-y-1.5 animate-scale-in">
-                  <div className="flex gap-1">
-                    {[1, 2, 3].map((i) => (
-                      <div key={i} className={`h-1 flex-1 rounded-full transition-colors ${i <= passwordStrength.level ? passwordStrength.color : 'bg-muted'}`} />
-                    ))}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {t('auth.register.passwordStrength')}: <span className={passwordStrength.level === 1 ? 'text-red-500' : passwordStrength.level === 2 ? 'text-yellow-500' : 'text-green-500'}>{strengthLabels[passwordStrength.level]}</span>
-                  </p>
-                </div>
-              )}
+              {/* 密码强度指示器（使用 PasswordStrength 组件） */}
+              <PasswordStrength password={password} />
               <p className="text-xs text-muted-foreground">{t('auth.register.passwordHint')}</p>
             </div>
             <div className="space-y-2">
@@ -339,14 +321,24 @@ function RegisterForm() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   id="confirmPassword"
-                  type="password"
+                  type={showConfirmPassword ? 'text' : 'password'}
                   placeholder="••••••••"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  className="pl-10 pr-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="new-password"
                   required
                   disabled={isLoading}
                 />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                  aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
               </div>
               {/* 密码匹配提示 */}
               {confirmPassword && (

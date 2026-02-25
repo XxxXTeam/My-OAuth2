@@ -12,6 +12,9 @@ import {
   User, Mail, Calendar, Shield, Loader2, Check, AlertCircle, Globe, Phone, Github, Twitter,
   Lock, Eye, EyeOff, BadgeCheck, Send, RefreshCw, Camera, Trash2, Briefcase, MapPin
 } from 'lucide-react';
+import { PasswordStrength } from '@/components/ui/password-strength';
+import { Dialog, DialogPanel, DialogTitle, Transition, TransitionChild } from '@headlessui/react';
+import { Fragment } from 'react';
 import type { UpdateProfileRequest, AddressInfo } from '@/lib/types';
 
 /* 头像上传组件 */
@@ -197,6 +200,120 @@ function EmailManagementCard({ user }: { user: { email: string; email_verified: 
   );
 }
 
+/* 删除账号危险区域组件 — 使用 Headless UI Dialog 模态弹窗 */
+function DeleteAccountCard() {
+  const { t } = useI18n();
+  const { logout } = useAuth();
+  const [isOpen, setIsOpen] = useState(false);
+  const [password, setPassword] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [confirmText, setConfirmText] = useState('');
+
+  const closeDialog = () => { setIsOpen(false); setPassword(''); setConfirmText(''); setDeleteError(null); setShowPwd(false); };
+
+  const handleDelete = async () => {
+    setDeleteError(null);
+    if (confirmText !== 'DELETE') {
+      setDeleteError(t('profile.deleteConfirmMismatch') || 'Please type DELETE to confirm');
+      return;
+    }
+    setIsDeleting(true);
+    const response = await api.deleteAccount(password);
+    if (response.success) {
+      logout();
+    } else {
+      setDeleteError(response.error?.message || t('profile.deleteAccountFailed') || 'Failed to delete account');
+    }
+    setIsDeleting(false);
+  };
+
+  return (
+    <>
+      <Card className="border-red-200 dark:border-red-900">
+        <CardHeader>
+          <CardTitle className="text-red-600 dark:text-red-400">{t('profile.dangerZone')}</CardTitle>
+          <CardDescription>{t('profile.dangerZoneDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="font-medium">{t('profile.deleteAccount')}</h4>
+              <p className="text-sm text-muted-foreground">{t('profile.deleteAccountDesc')}</p>
+            </div>
+            <Button variant="outline" className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/30" onClick={() => setIsOpen(true)}>
+              <Trash2 className="mr-1.5 h-4 w-4" />{t('profile.deleteAccount')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Headless UI 模态确认弹窗 */}
+      <Transition appear show={isOpen} as={Fragment}>
+        <Dialog as="div" className="relative z-50" onClose={closeDialog}>
+          <TransitionChild as={Fragment} enter="ease-out duration-200" enterFrom="opacity-0" enterTo="opacity-100" leave="ease-in duration-150" leaveFrom="opacity-100" leaveTo="opacity-0">
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" />
+          </TransitionChild>
+          <div className="fixed inset-0 overflow-y-auto">
+            <div className="flex min-h-full items-center justify-center p-4">
+              <TransitionChild as={Fragment} enter="ease-out duration-200" enterFrom="opacity-0 scale-95" enterTo="opacity-100 scale-100" leave="ease-in duration-150" leaveFrom="opacity-100 scale-100" leaveTo="opacity-0 scale-95">
+                <DialogPanel className="w-full max-w-md rounded-xl bg-white dark:bg-slate-900 p-6 shadow-2xl border border-red-200 dark:border-red-900">
+                  <div className="flex items-start gap-3 mb-4">
+                    <div className="flex-shrink-0 h-10 w-10 rounded-full bg-red-100 dark:bg-red-950/40 flex items-center justify-center">
+                      <AlertCircle className="h-5 w-5 text-red-600" />
+                    </div>
+                    <div>
+                      <DialogTitle className="text-lg font-semibold text-red-600 dark:text-red-400">
+                        {t('profile.deleteAccountWarning') || 'This action cannot be undone'}
+                      </DialogTitle>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t('profile.deleteAccountWarningDesc') || 'All your data, authorizations, and tokens will be permanently deleted.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {deleteError && (
+                    <div className="flex items-center gap-2 p-3 mb-4 bg-red-100 dark:bg-red-950/40 text-red-600 dark:text-red-400 rounded-lg text-sm">
+                      <AlertCircle className="h-4 w-4 flex-shrink-0" />{deleteError}
+                    </div>
+                  )}
+
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label>{t('profile.currentPasswordLabel') || 'Current Password'}</Label>
+                      <div className="relative">
+                        <Input type={showPwd ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('profile.currentPasswordPlaceholder') || 'Enter your password'} autoComplete="current-password" />
+                        <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowPwd(!showPwd)}>
+                          {showPwd ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{t('profile.deleteConfirmLabel') || 'Type DELETE to confirm'}</Label>
+                      <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" className="font-mono" />
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 justify-end mt-6">
+                    <Button variant="outline" onClick={closeDialog}>
+                      {t('profile.cancel') || 'Cancel'}
+                    </Button>
+                    <Button variant="destructive" onClick={handleDelete} disabled={isDeleting || confirmText !== 'DELETE'}>
+                      {isDeleting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Trash2 className="mr-1.5 h-4 w-4" />}
+                      {isDeleting ? (t('profile.deleting') || 'Deleting...') : (t('profile.confirmDelete') || 'Permanently Delete Account')}
+                    </Button>
+                  </div>
+                </DialogPanel>
+              </TransitionChild>
+            </div>
+          </div>
+        </Dialog>
+      </Transition>
+    </>
+  );
+}
+
 /* 修改密码卡片组件 */
 function ChangePasswordCard() {
   const { t } = useI18n();
@@ -232,7 +349,7 @@ function ChangePasswordCard() {
         <div className="space-y-2">
           <Label>{t('profile.currentPasswordLabel')}</Label>
           <div className="relative">
-            <Input type={showOld ? 'text' : 'password'} value={oldPassword} onChange={(e) => setOldPassword(e.target.value)} placeholder={t('profile.currentPasswordPlaceholder')} />
+            <Input type={showOld ? 'text' : 'password'} value={oldPassword} onChange={(e) => setOldPassword(e.target.value)} placeholder={t('profile.currentPasswordPlaceholder')} autoComplete="current-password" />
             <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowOld(!showOld)}>
               {showOld ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
@@ -242,15 +359,16 @@ function ChangePasswordCard() {
           <div className="space-y-2">
             <Label>{t('profile.newPasswordLabel')}</Label>
             <div className="relative">
-              <Input type={showNew ? 'text' : 'password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder={t('profile.newPasswordPlaceholder')} />
+              <Input type={showNew ? 'text' : 'password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder={t('profile.newPasswordPlaceholder')} autoComplete="new-password" />
               <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowNew(!showNew)}>
                 {showNew ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
+            <PasswordStrength password={newPassword} />
           </div>
           <div className="space-y-2">
             <Label>{t('profile.confirmPasswordLabel')}</Label>
-            <Input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder={t('profile.confirmPasswordPlaceholder')} />
+            <Input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder={t('profile.confirmPasswordPlaceholder')} autoComplete="new-password" />
           </div>
         </div>
         <div className="flex justify-end">
@@ -454,22 +572,8 @@ export default function ProfilePage() {
         </CardContent>
       </Card>
 
-      {/* Danger Zone */}
-      <Card className="border-red-200 dark:border-red-900">
-        <CardHeader>
-          <CardTitle className="text-red-600 dark:text-red-400">{t('profile.dangerZone')}</CardTitle>
-          <CardDescription>{t('profile.dangerZoneDesc')}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-between">
-            <div>
-              <h4 className="font-medium">{t('profile.deleteAccount')}</h4>
-              <p className="text-sm text-muted-foreground">{t('profile.deleteAccountDesc')}</p>
-            </div>
-            <Button variant="outline" className="text-red-600 hover:bg-red-50 hover:text-red-700">{t('profile.deleteAccount')}</Button>
-          </div>
-        </CardContent>
-      </Card>
+      {/* Danger Zone - 删除账号 */}
+      <DeleteAccountCard />
     </div>
   );
 }

@@ -89,6 +89,17 @@ func (r *DeviceCodeRepository) Deny(userCode string) error {
 		Update("status", model.DeviceCodeStatusDenied).Error
 }
 
+/*
+ * UpdateLastPolledAt 更新设备码的最后轮询时间
+ * @param deviceCode - 设备码字符串
+ * @param t          - 轮询时间
+ */
+func (r *DeviceCodeRepository) UpdateLastPolledAt(deviceCode string, t time.Time) error {
+	return r.db.Model(&model.DeviceCode{}).
+		Where("device_code = ?", deviceCode).
+		Update("last_polled_at", t).Error
+}
+
 /* Delete 删除设备授权记录 */
 func (r *DeviceCodeRepository) Delete(id uuid.UUID) error {
 	return r.db.Delete(&model.DeviceCode{}, id).Error

@@ -268,7 +268,7 @@
     "personalInfo": "Personal Information",
     "personalInfoDesc": "Your basic profile information",
     "username": "Username",
-    "email": "Email",
+    "emailLabel": "Email",
     "emailCannotChange": "Email cannot be changed",
     "accountInfo": "Account Information",
     "accountInfoDesc": "Details about your account",
@@ -279,6 +279,14 @@
     "dangerZoneDesc": "Irreversible actions for your account",
     "deleteAccount": "Delete Account",
     "deleteAccountDesc": "Permanently delete your account and all data",
+    "deleteAccountWarning": "This action cannot be undone",
+    "deleteAccountWarningDesc": "All your data, authorizations, and tokens will be permanently deleted.",
+    "deleteAccountFailed": "Failed to delete account",
+    "deleteConfirmLabel": "Type DELETE to confirm",
+    "deleteConfirmMismatch": "Please type DELETE to confirm",
+    "confirmDelete": "Permanently Delete Account",
+    "deleting": "Deleting...",
+    "cancel": "Cancel",
     "changePassword": "Change Password",
     "changePasswordDesc": "Update your login password",
     "currentPassword": "Current Password",
@@ -427,6 +435,10 @@
       "sendResetEmail": "Send Reset Email",
       "sendResetEmailSuccess": "Reset email sent",
       "sendResetEmailFailed": "Failed to send",
+      "unlock": "Unlock Account",
+      "unlockSuccess": "User account unlocked successfully",
+      "unlockFailed": "Failed to unlock account",
+      "locked": "Locked",
       "companyLabel": "Company",
       "departmentLabel": "Department",
       "jobTitleLabel": "Job Title",
@@ -712,6 +724,7 @@
     "networkError": "Network Error",
     "invalidRequest": "Invalid Request",
     "invalidCredentials": "Invalid email or password",
+    "accountLocked": "Account temporarily locked due to too many failed attempts. Please try again later.",
     "emailExists": "Email already registered",
     "usernameExists": "Username already taken",
     "appNotFound": "Application not found",
@@ -770,7 +783,8 @@
     "recentDeliveries": "Recent Deliveries",
     "noDeliveries": "No deliveries yet",
     "testSuccess": "Test delivery successful",
-    "testFailed": "Test delivery failed"
+    "testFailed": "Test delivery failed",
+    "urlInvalid": "URL must start with http:// or https://"
   },
   "toast": {
     "success": "Operation successful",
@@ -825,5 +839,12 @@
       "notFound": "Device code not found or expired",
       "authFailed": "Authorization failed, please try again"
     }
-  }
+  },
+  "password_weak": "Weak",
+  "password_fair": "Fair",
+  "password_good": "Good",
+  "password_strong": "Strong",
+  "password_very_strong": "Very Strong",
+  "password_min_8": "Min 8 chars",
+  "password_max_72": "Max 72 chars"
 }

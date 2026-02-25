@@ -6,10 +6,11 @@ package model
 
 import (
 	"encoding/json"
+	"server/pkg/password"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -262,40 +263,23 @@ func (u *User) HasTag(tag string) bool {
 
 /* splitTags 按逗号分割标签字符串（内部工具函数） */
 func splitTags(s string) []string {
-	result := []string{}
-	for _, part := range []byte(s) {
-		if part == ',' {
-			continue
-		}
+	if s == "" {
+		return nil
 	}
-	// Simple split by comma
-	current := ""
-	for _, c := range s {
-		if c == ',' {
-			if current != "" {
-				result = append(result, current)
-			}
-			current = ""
-		} else {
-			current += string(c)
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
 		}
-	}
-	if current != "" {
-		result = append(result, current)
 	}
 	return result
 }
 
 /* joinTags 将标签切片合并为逗号分隔字符串（内部工具函数） */
 func joinTags(tags []string) string {
-	result := ""
-	for i, t := range tags {
-		if i > 0 {
-			result += ","
-		}
-		result += t
-	}
-	return result
+	return strings.Join(tags, ",")
 }
 
 /* IsActive 检查用户是否处于活跃状态（status 为空或 "active"） */
@@ -318,24 +302,25 @@ func (u *User) IsLocked() bool {
 
 /*
  * SetPassword 对密码进行 bcrypt 哈希后存储
- * @param password - 明文密码
- * @return error   - 哈希失败时返回错误
+ * 功能：统一使用 password 包的 Hash 函数，确保 bcrypt cost 一致且受 72 字节限制保护
+ * @param pwd - 明文密码
+ * @return error - 哈希失败或密码过长时返回错误
  */
-func (u *User) SetPassword(password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+func (u *User) SetPassword(pwd string) error {
+	hash, err := password.Hash(pwd)
 	if err != nil {
 		return err
 	}
-	u.PasswordHash = string(hash)
+	u.PasswordHash = hash
 	return nil
 }
 
 /*
  * CheckPassword 校验密码是否与存储的哈希匹配
- * @param password - 明文密码
- * @return bool    - 匹配返回 true
+ * 功能：统一使用 password 包的 Verify 函数，确保与 SetPassword 使用相同的哈希策略
+ * @param pwd - 明文密码
+ * @return bool - 匹配返回 true
  */
-func (u *User) CheckPassword(password string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
-	return err == nil
+func (u *User) CheckPassword(pwd string) bool {
+	return password.Verify(pwd, u.PasswordHash)
 }

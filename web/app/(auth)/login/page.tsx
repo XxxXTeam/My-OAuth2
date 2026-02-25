@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Loader2, Mail, Lock, Shield, AlertCircle, ArrowRight, Sparkles } from 'lucide-react';
+import { Loader2, Mail, Lock, Shield, AlertCircle, ArrowRight, Sparkles, Eye, EyeOff } from 'lucide-react';
 import { ProviderIcon } from '@/components/provider-icon';
 import type { FederationProvider, SocialProvider } from '@/lib/types';
 
@@ -23,6 +23,7 @@ function LoginForm() {
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [federationProviders, setFederationProviders] = useState<FederationProvider[]>([]);
@@ -190,6 +191,7 @@ function LoginForm() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="email"
                   required
                   disabled={isLoading}
                 />
@@ -209,14 +211,24 @@ function LoginForm() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground transition-colors group-focus-within:text-primary" />
                 <Input
                   id="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="pl-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  className="pl-10 pr-10 h-11 bg-muted/50 border-muted focus:bg-background transition-colors"
+                  autoComplete="current-password"
                   required
                   disabled={isLoading}
                 />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
               </div>
             </div>
           </CardContent>

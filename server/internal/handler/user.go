@@ -7,6 +7,8 @@ import (
 	"server/internal/model"
 	"server/internal/repository"
 	"server/internal/service"
+	"server/pkg/audit"
+	"server/pkg/sanitize"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -118,9 +120,14 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	// Update fields if provided (nil = not sent, pointer to "" = clear field)
+	/* 输入清洗：防止 XSS 和非法字符注入 */
 	if req.Username != nil && *req.Username != "" && *req.Username != user.Username {
-		exists, err := h.userRepo.ExistsByUsername(*req.Username)
+		cleaned, valid := sanitize.Username(*req.Username)
+		if !valid {
+			BadRequest(c, "Username can only contain letters, numbers, underscores, hyphens and CJK characters (3-50 chars)")
+			return
+		}
+		exists, err := h.userRepo.ExistsByUsername(cleaned)
 		if err != nil {
 			InternalError(c, "Failed to check username")
 			return
@@ -129,20 +136,20 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 			BadRequest(c, "Username already taken")
 			return
 		}
-		user.Username = *req.Username
+		user.Username = cleaned
 	}
 
 	if req.Avatar != nil {
 		user.Avatar = *req.Avatar
 	}
 	if req.GivenName != nil {
-		user.GivenName = *req.GivenName
+		user.GivenName = sanitize.PlainText(*req.GivenName, 100)
 	}
 	if req.FamilyName != nil {
-		user.FamilyName = *req.FamilyName
+		user.FamilyName = sanitize.PlainText(*req.FamilyName, 100)
 	}
 	if req.Nickname != nil {
-		user.Nickname = *req.Nickname
+		user.Nickname = sanitize.PlainText(*req.Nickname, 100)
 	}
 	if req.Gender != nil {
 		user.Gender = *req.Gender
@@ -155,7 +162,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		}
 	}
 	if req.PhoneNumber != nil {
-		user.PhoneNumber = *req.PhoneNumber
+		user.PhoneNumber = sanitize.String(*req.PhoneNumber, 30)
 	}
 	if req.Address != nil {
 		user.SetAddress(req.Address)
@@ -167,22 +174,31 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		user.Zoneinfo = *req.Zoneinfo
 	}
 	if req.Website != nil {
-		user.Website = *req.Website
+		if *req.Website != "" {
+			if cleaned, ok := sanitize.URL(*req.Website); ok {
+				user.Website = cleaned
+			} else {
+				BadRequest(c, "Website must be a valid HTTP or HTTPS URL")
+				return
+			}
+		} else {
+			user.Website = ""
+		}
 	}
 	if req.Bio != nil {
-		user.Bio = *req.Bio
+		user.Bio = sanitize.PlainText(*req.Bio, 500)
 	}
 	if req.SocialAccounts != nil {
 		user.SetSocialAccounts(req.SocialAccounts)
 	}
 	if req.Company != nil {
-		user.Company = *req.Company
+		user.Company = sanitize.PlainText(*req.Company, 200)
 	}
 	if req.Department != nil {
-		user.Department = *req.Department
+		user.Department = sanitize.PlainText(*req.Department, 200)
 	}
 	if req.JobTitle != nil {
-		user.JobTitle = *req.JobTitle
+		user.JobTitle = sanitize.PlainText(*req.JobTitle, 200)
 	}
 
 	// Mark profile as completed if key fields are filled
@@ -402,14 +418,19 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 	}
 
 	if err := h.authService.ChangePassword(userID, req.OldPassword, req.NewPassword); err != nil {
-		if errors.Is(err, service.ErrInvalidCredentials) {
+		audit.Log(audit.ActionPasswordChange, audit.ResultFailure, userID.String(), userID.String(), c.ClientIP(), "reason", err.Error())
+		switch {
+		case errors.Is(err, service.ErrInvalidCredentials):
 			BadRequest(c, "Old password is incorrect")
-			return
+		case errors.Is(err, service.ErrPasswordTooWeak):
+			BadRequest(c, "Password does not meet strength requirements")
+		default:
+			InternalError(c, "Failed to change password")
 		}
-		InternalError(c, "Failed to change password")
 		return
 	}
 
+	audit.Log(audit.ActionPasswordChange, audit.ResultSuccess, userID.String(), userID.String(), c.ClientIP())
 	Success(c, gin.H{"message": "Password changed successfully"})
 }
 
@@ -499,6 +520,44 @@ func (h *UserHandler) RequestEmailChange(c *gin.Context) {
 	}
 
 	Success(c, gin.H{"message": "Verification email sent to new address"})
+}
+
+/*
+ * DeleteAccount 用户自助删除账号 (GDPR 合规)
+ * @route POST /api/user/delete-account
+ * 功能：验证密码后永久删除用户数据，撤销所有 token 和授权，清除 Cookie
+ */
+func (h *UserHandler) DeleteAccount(c *gin.Context) {
+	userID, ok := ctx.GetUserID(c)
+	if !ok {
+		Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, err.Error())
+		return
+	}
+
+	if err := h.authService.DeleteAccount(userID, req.Password); err != nil {
+		if errors.Is(err, service.ErrInvalidCredentials) {
+			Unauthorized(c, "Invalid password")
+			return
+		}
+		InternalError(c, "Failed to delete account")
+		return
+	}
+
+	audit.Log(audit.ActionAccountDelete, audit.ResultSuccess, userID.String(), userID.String(), c.ClientIP(), "self_delete", "true")
+
+	/* 清除鉴权 Cookie */
+	c.SetCookie("access_token", "", -1, "/", "", false, true)
+	c.SetCookie("refresh_token", "", -1, "/", "", false, true)
+
+	Success(c, gin.H{"message": "Account deleted successfully"})
 }
 
 // parseUUID helper function

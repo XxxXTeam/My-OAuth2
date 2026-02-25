@@ -7,9 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"server/internal/model"
@@ -17,6 +21,12 @@ import (
 	"server/pkg/logger"
 
 	"github.com/google/uuid"
+)
+
+/* Webhook URL 安全校验错误 */
+var (
+	ErrWebhookURLInvalid  = errors.New("webhook URL must be a valid HTTP or HTTPS URL")
+	ErrWebhookURLInsecure = errors.New("webhook URL must use HTTPS in production")
 )
 
 /*
@@ -38,6 +48,13 @@ func NewWebhookService(webhookRepo *repository.WebhookRepository) *WebhookServic
 		webhookRepo: webhookRepo,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        50,
+				MaxIdleConnsPerHost: 5,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				DisableKeepAlives:   false,
+			},
 		},
 		log: logger.Default(),
 	}
@@ -50,10 +67,15 @@ func NewWebhookService(webhookRepo *repository.WebhookRepository) *WebhookServic
  * @param secret - 签名密钥
  * @param events - 订阅事件（逗号分隔）
  */
-func (s *WebhookService) CreateWebhook(appID uuid.UUID, url, secret, events string) (*model.Webhook, error) {
+func (s *WebhookService) CreateWebhook(appID uuid.UUID, webhookURL, secret, events string) (*model.Webhook, error) {
+	/* 校验 Webhook URL 安全性 */
+	if err := validateWebhookURL(webhookURL); err != nil {
+		return nil, err
+	}
+
 	webhook := &model.Webhook{
 		AppID:  appID,
-		URL:    url,
+		URL:    webhookURL,
 		Secret: secret,
 		Events: events,
 		Active: true,
@@ -64,6 +86,58 @@ func (s *WebhookService) CreateWebhook(appID uuid.UUID, url, secret, events stri
 	}
 
 	return webhook, nil
+}
+
+/*
+ * validateWebhookURL 校验 Webhook 回调 URL 安全性
+ * 规则：仅允许 http/https 协议，阻止 javascript:/data: 等危险协议
+ *       生产环境建议仅允许 HTTPS
+ */
+func validateWebhookURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ErrWebhookURLInvalid
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ErrWebhookURLInvalid
+	}
+	/*
+	 * SSRF 防护：使用 net.IP 解析检测内部网络地址
+	 * 覆盖 RFC 1918 私有地址 + 链路本地 + 环回 + 未指定 + 元数据服务
+	 */
+	host := parsed.Hostname()
+	if host == "" {
+		return ErrWebhookURLInvalid
+	}
+	/* 先检查主机名（localhost 等无法 IP 解析） */
+	if strings.EqualFold(host, "localhost") {
+		return errors.New("webhook URL must not point to internal network addresses")
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && isPrivateIP(ip) {
+		return errors.New("webhook URL must not point to internal network addresses")
+	}
+	return nil
+}
+
+/*
+ * isPrivateIP 判断 IP 是否为内部/私有地址
+ * 覆盖：环回、未指定、私有(RFC1918)、链路本地(169.254/fe80)、ULA(fc00::/7)
+ */
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	/* Go 1.17+ net.IP.IsPrivate() 覆盖 10/8, 172.16/12, 192.168/16, fc00::/7 */
+	if ip.IsPrivate() {
+		return true
+	}
+	/* 云元数据服务地址 169.254.169.254 */
+	if ip.Equal(net.ParseIP("169.254.169.254")) {
+		return true
+	}
+	return false
 }
 
 /*
@@ -82,13 +156,18 @@ func (s *WebhookService) GetWebhooks(appID uuid.UUID) ([]model.Webhook, error) {
  * @param events - 新的订阅事件
  * @param active - 是否启用
  */
-func (s *WebhookService) UpdateWebhook(id uuid.UUID, url, secret, events string, active bool) error {
+func (s *WebhookService) UpdateWebhook(id uuid.UUID, webhookURL, secret, events string, active bool) error {
+	/* 校验新 URL 安全性 */
+	if err := validateWebhookURL(webhookURL); err != nil {
+		return err
+	}
+
 	webhook, err := s.webhookRepo.FindByID(id)
 	if err != nil {
 		return err
 	}
 
-	webhook.URL = url
+	webhook.URL = webhookURL
 	if secret != "" {
 		webhook.Secret = secret
 	}
