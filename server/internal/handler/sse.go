@@ -7,8 +7,10 @@ import (
 	"time"
 
 	gctx "server/internal/context"
+	"server/internal/repository"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 /* AuthEvent 授权事件结构（SSE 推送给客户端的事件数据） */
@@ -109,10 +111,12 @@ func EmitAuthEvent(event AuthEvent) {
 }
 
 // SSEHandler handles SSE connections
-type SSEHandler struct{}
+type SSEHandler struct {
+	appRepo *repository.ApplicationRepository
+}
 
-func NewSSEHandler() *SSEHandler {
-	return &SSEHandler{}
+func NewSSEHandler(appRepo *repository.ApplicationRepository) *SSEHandler {
+	return &SSEHandler{appRepo: appRepo}
 }
 
 // Stream handles SSE stream connections
@@ -181,6 +185,25 @@ func (h *SSEHandler) StreamApp(c *gin.Context) {
 	if appID == "" {
 		BadRequest(c, "app_id is required")
 		return
+	}
+
+	/* 归属校验：仅 app owner 或 admin 可订阅 */
+	userID, _ := gctx.GetUserID(c)
+	if !gctx.IsAdmin(c) && h.appRepo != nil {
+		parsedAppID, err := uuid.Parse(appID)
+		if err != nil {
+			BadRequest(c, "invalid app_id")
+			return
+		}
+		app, err := h.appRepo.FindByID(parsedAppID)
+		if err != nil || app == nil {
+			NotFound(c, "application not found")
+			return
+		}
+		if app.UserID != userID {
+			Forbidden(c, "you do not own this application")
+			return
+		}
 	}
 
 	client := &SSEClient{

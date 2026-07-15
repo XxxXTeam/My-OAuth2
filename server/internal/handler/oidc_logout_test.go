@@ -48,22 +48,23 @@ func setupOIDCLogoutHandlerFixture(t *testing.T) oidcLogoutHandlerFixture {
 	}
 
 	app := &model.Application{
-		ClientID:      "oidc-logout-client",
-		ClientSecret:  "oidc-logout-secret",
-		Name:          "OIDC Logout Client",
-		UserID:        user.ID,
-		RedirectURIs:  `["http://localhost/logout-callback","http://localhost/logout-callback?from=rp"]`,
-		GrantTypes:    `["authorization_code"]`,
-		Scopes:        `["openid","profile"]`,
-		AllowedScopes: `["openid","profile"]`,
+		ClientID:               "oidc-logout-client",
+		ClientSecret:           "oidc-logout-secret",
+		Name:                   "OIDC Logout Client",
+		UserID:                 user.ID,
+		RedirectURIs:           `["http://localhost/callback"]`,
+		PostLogoutRedirectURIs: `["http://localhost/logout-callback","http://localhost/logout-callback?from=rp"]`,
+		GrantTypes:             `["authorization_code"]`,
+		Scopes:                 `["openid","profile"]`,
+		AllowedScopes:          `["openid","profile"]`,
 	}
 	if err := appRepo.Create(app); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 
 	manager := jwt.NewManager("test-secret-with-enough-length", "test-issuer")
-	oidcHandler := NewOIDCHandler("test-issuer")
-	oidcHandler.SetOAuthRepo(oauthRepo, manager)
+	oidcHandler := NewOIDCHandler("test-issuer", manager)
+	oidcHandler.SetOAuthRepo(oauthRepo)
 	oidcHandler.SetApplicationRepo(appRepo)
 
 	gin.SetMode(gin.TestMode)

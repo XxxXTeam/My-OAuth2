@@ -60,7 +60,10 @@ func (h *PasswordResetHandler) ForgotPassword(c *gin.Context) {
 	)
 	if err != nil {
 		if errors.Is(err, service.ErrResetTooManyRequests) {
-			TooManyRequests(c, "Too many password reset requests. Please try again later.")
+			// 不透露限流状态以防账户枚举，返回统一成功消息
+			Success(c, gin.H{
+				"message": "If an account with that email exists, a password reset link has been sent.",
+			})
 			return
 		}
 		if errors.Is(err, service.ErrUserNotFoundForReset) {

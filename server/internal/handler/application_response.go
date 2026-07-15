@@ -15,6 +15,7 @@ type AppResponse struct {
 	Name                    string   `json:"name"`
 	Description             string   `json:"description"`
 	RedirectURIs            []string `json:"redirect_uris"`
+	PostLogoutRedirectURIs  []string `json:"post_logout_redirect_uris"`
 	Scopes                  []string `json:"scopes"`
 	AllowedScopes           []string `json:"allowed_scopes"`
 	GrantTypes              []string `json:"grant_types"`
@@ -40,6 +41,7 @@ func toAppResponse(app *model.Application, clientSecret string) AppResponse {
 		Name:                    app.Name,
 		Description:             app.Description,
 		RedirectURIs:            app.GetRedirectURIs(),
+		PostLogoutRedirectURIs:  app.GetPostLogoutRedirectURIs(),
 		Scopes:                  app.GetOIDCScopes(),
 		AllowedScopes:           app.GetAllowedScopes(),
 		GrantTypes:              app.GetGrantTypes(),

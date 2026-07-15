@@ -181,7 +181,7 @@ func TestGenerateClientIDTokenWithNonceAndAuthTimeUsesClientSecretJWS(t *testing
 		t.Fatalf("client id_token should be compact JWS, got %q", idToken)
 	}
 
-	claims, err := m.ValidateClientIDToken(idToken, "client-1", "client-secret")
+	claims, err := m.ValidateClientIDToken(idToken, "client-1", "")
 	if err != nil {
 		t.Fatalf("ValidateClientIDToken() error: %v", err)
 	}
@@ -206,8 +206,11 @@ func TestGenerateClientIDTokenWithNonceAndAuthTimeUsesClientSecretJWS(t *testing
 	if claims.ATHash != atHash {
 		t.Fatalf("ATHash=%q want %q", claims.ATHash, atHash)
 	}
-	if _, err := m.ValidateClientIDToken(idToken, "client-1", "wrong-secret"); err != ErrInvalidToken {
-		t.Fatalf("ValidateClientIDToken(wrong secret)=%v want ErrInvalidToken", err)
+
+	// 使用不同 RSA 密钥的 Manager 验证应失败
+	m2 := NewManager("other-secret-key-with-enough-len", "test-issuer")
+	if _, err := m2.ValidateClientIDToken(idToken, "client-1", ""); err != ErrInvalidToken {
+		t.Fatalf("ValidateClientIDToken(different RSA key)=%v want ErrInvalidToken", err)
 	}
 }
 
@@ -215,7 +218,7 @@ func TestValidateClientIDTokenRejectsAuthorizedPartyMismatch(t *testing.T) {
 	m := newTestManager()
 	uid := uuid.New()
 	now := time.Now()
-	token := gojwt.NewWithClaims(gojwt.SigningMethodHS256, &Claims{
+	token := gojwt.NewWithClaims(gojwt.SigningMethodRS256, &Claims{
 		UserID:          uid,
 		Email:           "a@b.com",
 		Username:        "user",
@@ -232,12 +235,13 @@ func TestValidateClientIDTokenRejectsAuthorizedPartyMismatch(t *testing.T) {
 			NotBefore: gojwt.NewNumericDate(now.Add(-time.Minute)),
 		},
 	})
-	idToken, err := token.SignedString([]byte("client-secret"))
+	token.Header["kid"] = m.KeyID()
+	idToken, err := token.SignedString(m.RSAPrivateKey())
 	if err != nil {
 		t.Fatalf("sign id_token: %v", err)
 	}
 
-	if _, err := m.ValidateClientIDToken(idToken, "client-1", "client-secret"); err != ErrInvalidToken {
+	if _, err := m.ValidateClientIDToken(idToken, "client-1", ""); err != ErrInvalidToken {
 		t.Fatalf("ValidateClientIDToken(azp mismatch)=%v want ErrInvalidToken", err)
 	}
 }

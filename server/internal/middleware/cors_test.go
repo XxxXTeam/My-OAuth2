@@ -82,14 +82,28 @@ func TestCORS_Preflight_Disallowed(t *testing.T) {
 	}
 }
 
-func TestCORS_EmptyConfig_AllowAll(t *testing.T) {
-	r := setupCORSRouter() /* 空列表 = 允许所有 */
+func TestCORS_EmptyConfig_RejectsInNonDebugMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := setupCORSRouter() /* 空列表 + 非 debug 模式 = 拒绝跨域 */
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/test", nil)
+	req.Header.Set("Origin", "http://any-domain.com")
+	r.ServeHTTP(w, req)
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("empty config in non-debug mode should reject cross-origin, got %q", got)
+	}
+}
+
+func TestCORS_EmptyConfig_AllowsInDebugMode(t *testing.T) {
+	gin.SetMode(gin.DebugMode)
+	defer gin.SetMode(gin.TestMode)
+	r := setupCORSRouter() /* 空列表 + debug 模式 = 允许所有 */
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/test", nil)
 	req.Header.Set("Origin", "http://any-domain.com")
 	r.ServeHTTP(w, req)
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://any-domain.com" {
-		t.Errorf("empty config should allow all origins, got %q", got)
+		t.Errorf("empty config in debug mode should allow all origins, got %q", got)
 	}
 }
 

@@ -1,11 +1,11 @@
 package handler
 
 import (
-	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
+	"math/big"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"server/internal/model"
@@ -22,34 +22,28 @@ import (
  * 功能：处理 OpenID Connect Discovery、JWKS、WebFinger、OIDC Logout 等端点
  */
 type OIDCHandler struct {
-	issuer     string
-	privateKey *rsa.PrivateKey
-	keyID      string
-	mu         sync.RWMutex
-	oauthRepo  *repository.OAuthRepository
-	appRepo    *repository.ApplicationRepository
+	issuer    string
+	oauthRepo *repository.OAuthRepository
+	appRepo   *repository.ApplicationRepository
 	jwtManager *jwt.Manager
-	cache      cache.Cache
+	cache     cache.Cache
 }
 
 /*
  * NewOIDCHandler 创建 OIDC 处理器实例
  * @param issuer - JWT 签发者标识（iss）
+ * @param jwtManager - JWT 管理器（提供 RSA 公钥用于 JWKS）
  */
-func NewOIDCHandler(issuer string) *OIDCHandler {
-	h := &OIDCHandler{
-		issuer: issuer,
-		keyID:  "oauth2-key-1",
+func NewOIDCHandler(issuer string, jwtManager *jwt.Manager) *OIDCHandler {
+	return &OIDCHandler{
+		issuer:     issuer,
+		jwtManager: jwtManager,
 	}
-	/* RSA 密钥延迟生成：首次访问 JWKS 端点时触发，不阻塞服务启动 */
-	go h.generateKey()
-	return h
 }
 
-/* SetOAuthRepo 注入 OAuth 仓储和 JWT 管理器（用于 Token 撤销和 OIDC Logout） */
-func (h *OIDCHandler) SetOAuthRepo(oauthRepo *repository.OAuthRepository, jwtManager *jwt.Manager) {
+/* SetOAuthRepo 注入 OAuth 仓储（用于 Token 撤销和 OIDC Logout） */
+func (h *OIDCHandler) SetOAuthRepo(oauthRepo *repository.OAuthRepository) {
 	h.oauthRepo = oauthRepo
-	h.jwtManager = jwtManager
 }
 
 /* SetApplicationRepo 注入应用仓储（用于校验 OIDC logout 回跳地址） */
@@ -60,30 +54,6 @@ func (h *OIDCHandler) SetApplicationRepo(appRepo *repository.ApplicationReposito
 /* SetCache 注入统一缓存实例（用于 discovery/JWKS 热读缓存） */
 func (h *OIDCHandler) SetCache(c cache.Cache) {
 	h.cache = c
-}
-
-/*
- * generateKey 生成 RSA 密钥对用于 JWT/OIDC 签名
- * 使用 2048 位（NIST 推荐安全等级，生成速度比 4096 位快约 8 倍）
- */
-func (h *OIDCHandler) generateKey() {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return
-	}
-	h.mu.Lock()
-	h.privateKey = key
-	h.mu.Unlock()
-}
-
-/* ensureKey 确保 RSA 密钥已生成，未就绪时同步生成 */
-func (h *OIDCHandler) ensureKey() {
-	h.mu.RLock()
-	hasKey := h.privateKey != nil
-	h.mu.RUnlock()
-	if !hasKey {
-		h.generateKey()
-	}
 }
 
 // Discovery returns the OIDC discovery document
@@ -142,9 +112,9 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 			"public",
 		},
 
-		// 支持的ID Token签名算法：jwt.Manager 当前使用 HS256 签发 id_token
+		// 支持的ID Token签名算法：混合模式，ID Token 使用 RS256
 		"id_token_signing_alg_values_supported": []string{
-			"HS256",
+			"RS256",
 		},
 
 		// 支持的Token端点认证方法
@@ -186,6 +156,14 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 			"phone_number",
 			"phone_number_verified",
 			"address",
+			/* 非标准扩展 claims：profile scope 下由 UserInfo 输出 */
+			"bio",
+			"profile_completed",
+			"department",
+			"job_title",
+			"company",
+			/* groups scope 下由 UserInfo 输出：用户所属组/角色 */
+			"groups",
 		},
 
 		// PKCE 支持（仅 S256，plain 已禁用以防止中间人攻击）
@@ -215,6 +193,29 @@ func (h *OIDCHandler) Discovery(c *gin.Context) {
 	c.JSON(http.StatusOK, discovery)
 }
 
+/* OAuthAuthorizationServerMetadata 返回 RFC 8414 授权服务器元数据 */
+func (h *OIDCHandler) OAuthAuthorizationServerMetadata(c *gin.Context) {
+	issuer := requestScheme(c.Request) + "://" + requestHost(c.Request)
+	metadata := map[string]interface{}{
+		"issuer":                                        issuer,
+		"authorization_endpoint":                        issuer + "/oauth/authorize",
+		"token_endpoint":                                issuer + "/oauth/token",
+		"jwks_uri":                                      issuer + "/.well-known/jwks.json",
+		"revocation_endpoint":                           issuer + "/oauth/revoke",
+		"introspection_endpoint":                        issuer + "/oauth/introspect",
+		"device_authorization_endpoint":                 issuer + "/oauth/device/code",
+		"response_types_supported":                      []string{"code"},
+		"response_modes_supported":                      []string{"query"},
+		"grant_types_supported":                         []string{"authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code", "urn:ietf:params:oauth:grant-type:token-exchange"},
+		"token_endpoint_auth_methods_supported":         []string{"client_secret_basic", "client_secret_post", "none"},
+		"revocation_endpoint_auth_methods_supported":    []string{"client_secret_basic", "client_secret_post"},
+		"introspection_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"scopes_supported":                              model.AllServerSupportedScopes(),
+		"code_challenge_methods_supported":              []string{"S256"},
+	}
+	c.JSON(http.StatusOK, metadata)
+}
+
 // JWKS returns the JSON Web Key Set
 // GET /.well-known/jwks.json
 func (h *OIDCHandler) JWKS(c *gin.Context) {
@@ -227,14 +228,35 @@ func (h *OIDCHandler) JWKS(c *gin.Context) {
 		}
 	}
 
+	keys := []map[string]interface{}{}
+	if h.jwtManager != nil {
+		pub := h.jwtManager.PublicKey()
+		kid := h.jwtManager.KeyID()
+		if pub != nil {
+			keys = append(keys, rsaPublicKeyToJWK(pub, kid))
+		}
+	}
+
 	jwks := map[string]interface{}{
-		"keys": []map[string]interface{}{},
+		"keys": keys,
 	}
 
 	if h.cache != nil {
 		_ = cache.SetJSON(c.Request.Context(), h.cache, cacheKey, jwks, 2*time.Minute)
 	}
 	c.JSON(http.StatusOK, jwks)
+}
+
+/* rsaPublicKeyToJWK 将 RSA 公钥转换为 JWK 格式（RFC 7517） */
+func rsaPublicKeyToJWK(pub *rsa.PublicKey, kid string) map[string]interface{} {
+	return map[string]interface{}{
+		"kty": "RSA",
+		"use": "sig",
+		"alg": "RS256",
+		"kid": kid,
+		"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+	}
 }
 
 // WebFinger handles WebFinger requests for OIDC discovery
@@ -319,8 +341,8 @@ func (h *OIDCHandler) Logout(c *gin.Context) {
 		}
 	}
 
-	// 如果有已登记重定向 URI，重定向回去
-	if postLogoutRedirectURI != "" && logoutApp != nil && logoutApp.ValidateRedirectURI(postLogoutRedirectURI) {
+	// 如果有已登记登出回跳 URI，重定向回去
+	if postLogoutRedirectURI != "" && logoutApp != nil && logoutApp.ValidatePostLogoutRedirectURI(postLogoutRedirectURI) {
 		redirectURL := postLogoutRedirectURI
 		if state != "" {
 			if u, err := url.Parse(redirectURL); err == nil {

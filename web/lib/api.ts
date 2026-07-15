@@ -32,6 +32,8 @@ import type {
   LDAPProviderUpdateRequest,
   SAMLProviderConfig,
   SAMLProviderUpdateRequest,
+  SAMLIdPServiceProviderConfig,
+  SAMLIdPServiceProviderUpdateRequest,
   SocialProvider,
 } from './types';
 
@@ -525,6 +527,23 @@ class ApiClient {
     return this.request(`/api/apps/${id}/users?page=${page}&limit=${limit}`);
   }
 
+  async getAppSAMLIdPConfig(id: string): Promise<ApiResponse<SAMLIdPServiceProviderConfig>> {
+    return this.request<SAMLIdPServiceProviderConfig>(`/api/apps/${id}/saml-idp`);
+  }
+
+  async updateAppSAMLIdPConfig(id: string, data: SAMLIdPServiceProviderUpdateRequest): Promise<ApiResponse<SAMLIdPServiceProviderConfig>> {
+    return this.request<SAMLIdPServiceProviderConfig>(`/api/apps/${id}/saml-idp`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteAppSAMLIdPConfig(id: string): Promise<ApiResponse<void>> {
+    return this.request<void>(`/api/apps/${id}/saml-idp/delete`, {
+      method: 'POST',
+    });
+  }
+
   // OAuth endpoints
   async getOAuthAppInfo(
     clientId: string,
@@ -540,6 +559,7 @@ class ApiClient {
       scopes?: string[];
       allowed_scopes?: string[];
       grant_types?: string[];
+      post_logout_redirect_uris?: string[];
       issued_token_types?: string[];
       response_types_supported?: string[];
     };

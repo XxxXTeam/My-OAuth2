@@ -216,6 +216,7 @@ func Init(cfg *config.DatabaseConfig) error {
 		&model.LDAPIdentity{},
 		&model.SAMLProvider{},
 		&model.SAMLIdentity{},
+		&model.SAMLIdPServiceProvider{},
 		&model.PasswordReset{},
 		&model.DeviceCode{},
 		&model.EmailVerification{},

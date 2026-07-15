@@ -63,14 +63,15 @@ func CORSWithConfig(allowedOrigins ...string) gin.HandlerFunc {
 /*
  * isOriginAllowed 检查 origin 是否在允许列表中
  * 规则：
- *   - 空列表 = 允许所有来源（开发模式）
+ *   - 空列表 + debug 模式 = 允许所有来源
+ *   - 空列表 + release/test 模式 = 拒绝所有跨域
  *   - 精确匹配
  *   - 仅在 Gin 为 debug 模式时，localhost/127.0.0.1 的任意端口自动允许
  */
 func isOriginAllowed(origin string, allowedSet map[string]bool) bool {
-	/* 没有配置允许列表 → 允许所有（适用于开发环境） */
+	/* 没有配置允许列表 → 仅 debug 模式放行，生产环境拒绝 */
 	if len(allowedSet) == 0 {
-		return true
+		return gin.Mode() == gin.DebugMode
 	}
 
 	cleanOrigin := strings.TrimRight(origin, "/")

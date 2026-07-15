@@ -138,6 +138,7 @@ export interface Application {
   name: string;
   description: string;
   redirect_uris: string[];
+  post_logout_redirect_uris?: string[];
   scopes: string[];
   allowed_scopes?: string[];
   grant_types: string[];
@@ -153,6 +154,7 @@ export interface CreateAppRequest {
   name: string;
   description?: string;
   redirect_uris: string[];
+  post_logout_redirect_uris?: string[];
   scopes?: string[];
   allowed_scopes?: string[];
   grant_types?: string[];
@@ -164,11 +166,35 @@ export interface UpdateAppRequest {
   name?: string;
   description?: string;
   redirect_uris?: string[];
+  post_logout_redirect_uris?: string[];
   scopes?: string[];
   allowed_scopes?: string[];
   grant_types?: string[];
   app_type?: string;
   token_endpoint_auth_method?: string;
+}
+
+export interface SAMLIdPServiceProviderConfig {
+  id?: string;
+  app_id: string;
+  sp_entity_id?: string;
+  acs_url?: string;
+  certificate_configured: boolean;
+  name_id_format: string;
+  attribute_mappings?: Record<string, string>;
+  enabled: boolean;
+  idp_entity_id: string;
+  idp_metadata_url: string;
+  idp_sso_url: string;
+}
+
+export interface SAMLIdPServiceProviderUpdateRequest {
+  sp_entity_id: string;
+  acs_url: string;
+  certificate_pem?: string;
+  name_id_format?: string;
+  attribute_mappings?: Record<string, string>;
+  enabled: boolean;
 }
 
 // OAuth types

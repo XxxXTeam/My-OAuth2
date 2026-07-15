@@ -34,6 +34,7 @@ type CreateAppRequest struct {
 	Name                    string   `json:"name" binding:"required,min=1,max=200"`
 	Description             string   `json:"description"`
 	RedirectURIs            []string `json:"redirect_uris" binding:"required,min=1"`
+	PostLogoutRedirectURIs  []string `json:"post_logout_redirect_uris"`
 	Scopes                  []string `json:"scopes"`
 	AllowedScopes           []string `json:"allowed_scopes"`
 	GrantTypes              []string `json:"grant_types"`
@@ -66,6 +67,7 @@ func (h *ApplicationHandler) CreateApp(c *gin.Context) {
 		Name:                    req.Name,
 		Description:             req.Description,
 		RedirectURIs:            req.RedirectURIs,
+		PostLogoutRedirectURIs:  req.PostLogoutRedirectURIs,
 		Scopes:                  req.Scopes,
 		AllowedScopes:           req.AllowedScopes,
 		GrantTypes:              req.GrantTypes,
@@ -154,6 +156,7 @@ type UpdateAppRequest struct {
 	Name                    string   `json:"name"`
 	Description             string   `json:"description"`
 	RedirectURIs            []string `json:"redirect_uris"`
+	PostLogoutRedirectURIs  []string `json:"post_logout_redirect_uris"`
 	Scopes                  []string `json:"scopes"`
 	AllowedScopes           []string `json:"allowed_scopes"`
 	GrantTypes              []string `json:"grant_types"`
@@ -194,6 +197,7 @@ func (h *ApplicationHandler) UpdateApp(c *gin.Context) {
 		Name:                    req.Name,
 		Description:             req.Description,
 		RedirectURIs:            req.RedirectURIs,
+		PostLogoutRedirectURIs:  req.PostLogoutRedirectURIs,
 		Scopes:                  req.Scopes,
 		AllowedScopes:           req.AllowedScopes,
 		GrantTypes:              req.GrantTypes,

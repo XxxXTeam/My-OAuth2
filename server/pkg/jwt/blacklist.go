@@ -8,6 +8,7 @@ package jwt
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"server/pkg/cache"
@@ -49,7 +50,7 @@ func (b *Blacklist) Revoke(jti string, expiresAt time.Time) error {
 /*
  * IsRevoked 检查指定 JTI 是否已被吊销
  * @param jti - JWT ID
- * @return bool - 已吊销返回 true
+ * @return bool - 已吊销返回 true；缓存异常时 fail-closed 返回 true
  */
 func (b *Blacklist) IsRevoked(jti string) bool {
 	if b.cache == nil || jti == "" {
@@ -57,7 +58,7 @@ func (b *Blacklist) IsRevoked(jti string) bool {
 	}
 	exists, err := b.cache.Exists(context.Background(), blacklistKeyPrefix+jti)
 	if err != nil {
-		return false /* 缓存异常时不阻断请求，降级为不检查 */
+		return true
 	}
 	return exists
 }
@@ -82,7 +83,7 @@ func (b *Blacklist) RevokeAllForUser(userID string, ttl time.Duration) error {
  * IsUserTokenRevoked 检查用户的 token 是否因全局吊销而失效
  * @param userID  - 用户 ID
  * @param issuedAt - token 签发时间
- * @return bool   - 如果 token 签发时间早于吊销时间则返回 true
+ * @return bool   - 如果 token 签发时间早于吊销时间则返回 true；缓存异常时 fail-closed
  */
 func (b *Blacklist) IsUserTokenRevoked(userID string, issuedAt time.Time) bool {
 	if b.cache == nil || userID == "" {
@@ -91,7 +92,10 @@ func (b *Blacklist) IsUserTokenRevoked(userID string, issuedAt time.Time) bool {
 	key := "jwt_revoke_user:" + userID
 	data, err := b.cache.Get(context.Background(), key)
 	if err != nil {
-		return false
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "not exist") {
+			return false
+		}
+		return true
 	}
 	revokedBefore, err := time.Parse(time.RFC3339, string(data))
 	if err != nil {

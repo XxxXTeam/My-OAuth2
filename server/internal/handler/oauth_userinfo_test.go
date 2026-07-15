@@ -79,7 +79,9 @@ func setupOAuthUserInfoHandlerFixture(t *testing.T) oauthUserInfoHandlerFixture 
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.GET("/oauth/userinfo", NewOAuthHandler(oauthService, nil, "", "").UserInfo)
+	oauthHandler := NewOAuthHandler(oauthService, nil, "", "")
+	router.GET("/oauth/userinfo", oauthHandler.UserInfo)
+	router.POST("/oauth/userinfo", oauthHandler.UserInfo)
 
 	return oauthUserInfoHandlerFixture{
 		router:    router,
@@ -183,6 +185,31 @@ func TestOAuthHandler_UserInfoAllowsAccessTokenWithOpenIDScope(t *testing.T) {
 	}
 	if body.Email != f.user.Email {
 		t.Fatalf("email=%q want %s", body.Email, f.user.Email)
+	}
+}
+
+func TestOAuthHandler_UserInfoAllowsPost(t *testing.T) {
+	f := setupOAuthUserInfoHandlerFixture(t)
+	accessToken := createUserInfoAccessToken(t, f, "userinfo-handler-post-token", "openid email")
+
+	req := httptest.NewRequest(http.MethodPost, "/oauth/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken.Token)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body struct {
+		Sub   string `json:"sub"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+	}
+	if body.Sub != f.user.ID.String() || body.Email != f.user.Email {
+		t.Fatalf("body=%+v", body)
 	}
 }
 

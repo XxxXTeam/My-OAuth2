@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"server/pkg/jwt"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,7 +16,8 @@ func getOIDCDiscovery(t *testing.T) map[string]interface{} {
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.GET("/.well-known/openid-configuration", NewOIDCHandler("test-issuer").Discovery)
+	jwtManager := jwt.NewManager("test-secret-with-enough-length", "test-issuer")
+	router.GET("/.well-known/openid-configuration", NewOIDCHandler("test-issuer", jwtManager).Discovery)
 
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
 	req.Host = "auth.example.test"
@@ -38,7 +41,8 @@ func getOIDCJWKS(t *testing.T) map[string]interface{} {
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.GET("/.well-known/jwks.json", NewOIDCHandler("test-issuer").JWKS)
+	jwtManager := jwt.NewManager("test-secret-with-enough-length", "test-issuer")
+	router.GET("/.well-known/jwks.json", NewOIDCHandler("test-issuer", jwtManager).JWKS)
 
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
 	req.Host = "auth.example.test"
@@ -112,7 +116,7 @@ func TestOIDCHandler_DiscoveryAdvertisesImplementedAuthorizeCapabilities(t *test
 func TestOIDCHandler_DiscoveryAdvertisesImplementedIDTokenSigningAlgorithm(t *testing.T) {
 	body := getOIDCDiscovery(t)
 
-	requireDiscoveryStringSlice(t, body, "id_token_signing_alg_values_supported", []string{"HS256"})
+	requireDiscoveryStringSlice(t, body, "id_token_signing_alg_values_supported", []string{"RS256"})
 }
 
 func TestOIDCHandler_DiscoveryAdvertisesImplementedClaims(t *testing.T) {
@@ -146,6 +150,12 @@ func TestOIDCHandler_DiscoveryAdvertisesImplementedClaims(t *testing.T) {
 		"phone_number",
 		"phone_number_verified",
 		"address",
+		"bio",
+		"profile_completed",
+		"department",
+		"job_title",
+		"company",
+		"groups",
 	})
 }
 
@@ -200,7 +210,40 @@ func TestOIDCHandler_DiscoveryAdvertisesSSOIntegrationEndpoints(t *testing.T) {
 	}
 }
 
-func TestOIDCHandler_JWKSDoesNotPublishUnusedRS256Key(t *testing.T) {
+func TestOIDCHandler_OAuthAuthorizationServerMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	jwtManager := jwt.NewManager("test-secret-with-enough-length", "test-issuer")
+	router.GET("/.well-known/oauth-authorization-server", NewOIDCHandler("test-issuer", jwtManager).OAuthAuthorizationServerMetadata)
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	req.Host = "auth.example.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode metadata: %v body=%s", err, rec.Body.String())
+	}
+	if got := body["issuer"]; got != "https://auth.example.test" {
+		t.Fatalf("issuer=%#v want https://auth.example.test", got)
+	}
+	requireDiscoveryStringSlice(t, body, "response_types_supported", []string{"code"})
+	requireDiscoveryStringSlice(t, body, "code_challenge_methods_supported", []string{"S256"})
+	if got := body["authorization_endpoint"]; got != "https://auth.example.test/oauth/authorize" {
+		t.Fatalf("authorization_endpoint=%#v", got)
+	}
+	if got := body["device_authorization_endpoint"]; got != "https://auth.example.test/oauth/device/code" {
+		t.Fatalf("device_authorization_endpoint=%#v", got)
+	}
+}
+
+func TestOIDCHandler_JWKSPublishesRS256Key(t *testing.T) {
 	body := getOIDCJWKS(t)
 
 	raw, ok := body["keys"]
@@ -211,7 +254,26 @@ func TestOIDCHandler_JWKSDoesNotPublishUnusedRS256Key(t *testing.T) {
 	if !ok {
 		t.Fatalf("keys=%#v want array", raw)
 	}
-	if len(keys) != 0 {
-		t.Fatalf("keys length=%d want 0 keys=%#v", len(keys), keys)
+	if len(keys) != 1 {
+		t.Fatalf("keys length=%d want 1 keys=%#v", len(keys), keys)
+	}
+	key := keys[0].(map[string]interface{})
+	if key["kty"] != "RSA" {
+		t.Fatalf("kty=%v want RSA", key["kty"])
+	}
+	if key["alg"] != "RS256" {
+		t.Fatalf("alg=%v want RS256", key["alg"])
+	}
+	if key["use"] != "sig" {
+		t.Fatalf("use=%v want sig", key["use"])
+	}
+	if key["kid"] == nil || key["kid"] == "" {
+		t.Fatal("kid must not be empty")
+	}
+	if key["n"] == nil || key["n"] == "" {
+		t.Fatal("n (modulus) must not be empty")
+	}
+	if key["e"] == nil || key["e"] == "" {
+		t.Fatal("e (exponent) must not be empty")
 	}
 }

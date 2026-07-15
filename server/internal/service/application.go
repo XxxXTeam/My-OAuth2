@@ -51,6 +51,7 @@ type CreateAppInput struct {
 	Name                    string
 	Description             string
 	RedirectURIs            []string
+	PostLogoutRedirectURIs  []string
 	Scopes                  []string
 	AllowedScopes           []string
 	GrantTypes              []string
@@ -67,10 +68,10 @@ type CreateAppInput struct {
  */
 func (s *ApplicationService) CreateApp(input *CreateAppInput) (*model.Application, error) {
 	app := &model.Application{
-		Name:        input.Name,
-		Description: input.Description,
-		UserID:      input.UserID,
-		AppType:     model.AppTypeConfidential,
+		Name:                    input.Name,
+		Description:             input.Description,
+		UserID:                  input.UserID,
+		AppType:                 model.AppTypeConfidential,
 		TokenEndpointAuthMethod: model.AuthMethodClientSecretBasic,
 	}
 	if input.AppType != "" {
@@ -80,6 +81,9 @@ func (s *ApplicationService) CreateApp(input *CreateAppInput) (*model.Applicatio
 		app.TokenEndpointAuthMethod = model.TokenEndpointAuthMethod(input.TokenEndpointAuthMethod)
 	}
 	app.SetRedirectURIs(input.RedirectURIs)
+	if len(input.PostLogoutRedirectURIs) > 0 {
+		app.SetPostLogoutRedirectURIs(input.PostLogoutRedirectURIs)
+	}
 	scopes := input.Scopes
 	if len(scopes) == 0 {
 		scopes = model.DefaultUserAuthorizationScopes()
@@ -140,6 +144,7 @@ type UpdateAppInput struct {
 	Name                    string
 	Description             string
 	RedirectURIs            []string
+	PostLogoutRedirectURIs  []string
 	Scopes                  []string
 	AllowedScopes           []string
 	GrantTypes              []string
@@ -174,6 +179,9 @@ func (s *ApplicationService) UpdateApp(input *UpdateAppInput) (*model.Applicatio
 	}
 	if len(input.RedirectURIs) > 0 {
 		app.SetRedirectURIs(input.RedirectURIs)
+	}
+	if input.PostLogoutRedirectURIs != nil {
+		app.SetPostLogoutRedirectURIs(input.PostLogoutRedirectURIs)
 	}
 	if len(input.Scopes) > 0 {
 		app.SetScopes(input.Scopes)

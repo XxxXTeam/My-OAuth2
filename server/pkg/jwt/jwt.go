@@ -7,6 +7,7 @@ package jwt
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -93,14 +94,18 @@ type Claims struct {
 }
 
 /**
- * Manager JWT 管理器（HMAC-SHA256）
+ * Manager JWT 管理器
  *
- * @description 共享 secret 签发与校验 JWT；强制 alg=HS256 防止算法混淆攻击。
+ * @description Access/Refresh token 使用 HS256（HMAC-SHA256）签名；
+ *              ID Token 使用 RS256（RSA-SHA256）签名，公钥通过 JWKS 端点暴露。
  */
 type Manager struct {
 	secretKey []byte
 	encKey    []byte
 	issuer    string
+	rsaKey    *rsa.PrivateKey
+	rsaPub    *rsa.PublicKey
+	keyID     string
 }
 
 /**
@@ -111,11 +116,38 @@ type Manager struct {
  * @returns {*Manager}
  */
 func NewManager(secretKey, issuer string) *Manager {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	return &Manager{
 		secretKey: []byte(secretKey),
 		encKey:    deriveEncryptionKey(secretKey),
 		issuer:    issuer,
+		rsaKey:    key,
+		rsaPub:    &key.PublicKey,
+		keyID:     "oauth2-key-1",
 	}
+}
+
+/** SetRSAKey 注入持久化的 RSA 密钥对（用于 ID Token RS256 签名） */
+func (m *Manager) SetRSAKey(key *rsa.PrivateKey) {
+	if key != nil {
+		m.rsaKey = key
+		m.rsaPub = &key.PublicKey
+	}
+}
+
+/** PublicKey 返回 RSA 公钥（供 JWKS 端点暴露） */
+func (m *Manager) PublicKey() *rsa.PublicKey {
+	return m.rsaPub
+}
+
+/** KeyID 返回 JWKS kid */
+func (m *Manager) KeyID() string {
+	return m.keyID
+}
+
+/** RSAPrivateKey 返回 RSA 私钥（仅供测试使用） */
+func (m *Manager) RSAPrivateKey() *rsa.PrivateKey {
+	return m.rsaKey
 }
 
 /**
@@ -240,10 +272,52 @@ func (m *Manager) GenerateClientIDTokenWithIssuerAndNonceAndAuthTimeAndAMR(userI
 }
 
 func (m *Manager) GenerateClientIDTokenWithIssuerAndNonceAndAuthTimeAndAMRAndATHash(userID uuid.UUID, email, username, role, clientID, clientSecret, issuer, scope, nonce string, authTime int64, amr []string, atHash string, ttl time.Duration) (string, error) {
-	if clientID == "" || clientSecret == "" {
+	if clientID == "" {
 		return "", ErrMissingSigningKey
 	}
-	return m.generateWithIssuerAndKeyAndATHash(userID, email, username, role, clientID, TokenTypeIDToken, scope, nonce, authTime, amr, atHash, ttl, issuer, []byte(clientSecret), false)
+	return m.generateIDTokenRS256(userID, email, username, role, clientID, scope, nonce, authTime, amr, atHash, ttl, issuer)
+}
+
+/** generateIDTokenRS256 使用 RSA-SHA256 签发 ID Token（供 RP 通过 JWKS 离线验证） */
+func (m *Manager) generateIDTokenRS256(userID uuid.UUID, email, username, role, clientID, scope, nonce string, authTime int64, amr []string, atHash string, ttl time.Duration, issuer string) (string, error) {
+	if m.rsaKey == nil {
+		return "", ErrMissingSigningKey
+	}
+	if issuer == "" {
+		issuer = m.issuer
+	}
+	now := time.Now()
+	if authTime < 0 {
+		authTime = 0
+	}
+
+	claims := &Claims{
+		UserID:          userID,
+		Email:           email,
+		Username:        username,
+		Role:            role,
+		TokenType:       TokenTypeIDToken,
+		ClientID:        clientID,
+		Scope:           scope,
+		Nonce:           nonce,
+		AuthTime:        authTime,
+		AMR:             normalizeAMR(amr),
+		ATHash:          atHash,
+		AuthorizedParty: clientID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    issuer,
+			Subject:   userID.String(),
+			Audience:  jwt.ClaimStrings{clientID},
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			NotBefore: jwt.NewNumericDate(now),
+			ID:        generateSecureJTI(),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = m.keyID
+	return token.SignedString(m.rsaKey)
 }
 
 /**
@@ -388,40 +462,31 @@ func (m *Manager) ValidateToken(tokenString string) (*Claims, error) {
 }
 
 /*
- * ValidateClientIDToken 校验外部 client 的 HS256 id_token。
- * 签名密钥为该 client 的 client_secret，同时校验 issuer、audience、token_type 和 client_id。
+ * ValidateClientIDToken 校验 RS256 签名的 ID Token。
+ * 使用 Provider RSA 公钥验证，同时校验 issuer、audience、token_type 和 client_id。
+ * clientSecret 参数保留以兼容接口签名，但不再用于验证（ID Token 统一使用 Provider RSA 密钥签名）。
  */
 func (m *Manager) ValidateClientIDToken(tokenString, clientID, clientSecret string) (*Claims, error) {
 	return m.ValidateClientIDTokenWithIssuer(tokenString, clientID, clientSecret, "")
 }
 
 func (m *Manager) ValidateClientIDTokenWithIssuer(tokenString, clientID, clientSecret, issuer string) (*Claims, error) {
-	if clientID == "" || clientSecret == "" {
+	if clientID == "" {
 		return nil, ErrMissingSigningKey
 	}
 	if issuer == "" {
 		issuer = m.issuer
 	}
-	if IsEncryptedToken(tokenString) {
-		claims, err := m.ValidateToken(tokenString)
-		if err != nil {
-			return nil, err
-		}
-		if claims.TokenType != TokenTypeIDToken || claims.ClientID != clientID || !audienceContains(claims.Audience, clientID) {
-			return nil, ErrInvalidToken
-		}
-		if claims.AuthorizedParty != "" && claims.AuthorizedParty != clientID {
-			return nil, ErrInvalidToken
-		}
-		return claims, nil
+	if m.rsaPub == nil {
+		return nil, ErrMissingSigningKey
 	}
 
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, ErrInvalidToken
 		}
-		return []byte(clientSecret), nil
-	}, jwt.WithIssuer(issuer), jwt.WithAudience(clientID), jwt.WithValidMethods([]string{"HS256"}))
+		return m.rsaPub, nil
+	}, jwt.WithIssuer(issuer), jwt.WithAudience(clientID), jwt.WithValidMethods([]string{"RS256"}))
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return nil, ErrExpiredToken

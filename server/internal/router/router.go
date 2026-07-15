@@ -46,6 +46,13 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 	r.RedirectTrailingSlash = false
 	r.RedirectFixedPath = false
 
+	/* 可信代理：防止 X-Forwarded-For 伪造绕过限流 */
+	if len(cfg.Server.TrustedProxies) > 0 {
+		r.SetTrustedProxies(cfg.Server.TrustedProxies)
+	} else {
+		r.SetTrustedProxies(nil)
+	}
+
 	/* 全局中间件 */
 	r.Use(middleware.TraceID())
 	r.Use(middleware.RecoveryWithLogger())
@@ -74,6 +81,13 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 	oauthRepo := repository.NewOAuthRepository(db)
 	configRepo := repository.NewConfigRepository(db)
 	cachedConfigRepo := repository.NewCachedConfigRepository(configRepo, cacheInstance)
+
+	/* ID Token（RS256）签名密钥：从 system_configs 加载或首次生成并持久化，保证重启后 JWKS 公钥稳定 */
+	if rsaKey, err := loadOrGenerateRSAKey(configRepo); err != nil {
+		logger.Warn("加载/生成 ID Token RSA 签名密钥失败，回退至进程内临时密钥", "error", err)
+	} else {
+		jwtManager.SetRSAKey(rsaKey)
+	}
 	loginLogRepo := repository.NewLoginLogRepository(db)
 	riskEventRepo := repository.NewRiskEventRepository(db)
 	userAuthRepo := repository.NewUserAuthorizationRepository(db)
@@ -84,6 +98,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 	ldapIdentityRepo := repository.NewLDAPIdentityRepository(db)
 	samlProviderRepo := repository.NewSAMLProviderRepository(db)
 	samlIdentityRepo := repository.NewSAMLIdentityRepository(db)
+	samlIDPServiceProviderRepo := repository.NewSAMLIdPServiceProviderRepository(db)
 	sdkExternalRepo := repository.NewSDKExternalIdentityRepository(db)
 	// 缓存包装的 Federation Repository（支持 memory / redis 后端，减少 ListProviders 热路径 DB 查询）
 	cachedFederationRepo := repository.NewCachedFederationRepository(federationRepo, cacheInstance)
@@ -126,6 +141,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 	}
 
 	baseURL := handler.BrowserReachableBaseURL(fmt.Sprintf("http://%s:%d", cfg.Server.Host, cfg.Server.Port))
+	samlIDPService := service.NewSAMLIdPService(samlIDPServiceProviderRepo, configRepo, userRepo, oauthRepo, jwtManager, tokenBlacklist, baseURL, frontendURL)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authService, cfg)
@@ -136,6 +152,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 	ldapAuthHandler.SetWebhookService(webhookService)
 	samlAuthHandler := handler.NewSAMLAuthHandler(samlProviderRepo, samlAuthService, cfg, baseURL, frontendURL)
 	samlAuthHandler.SetWebhookService(webhookService)
+	samlIDPHandler := handler.NewSAMLIdPHandler(samlIDPService, appRepo)
 	userHandler := handler.NewUserHandler(authService, userRepo, userAuthRepo)
 	userHandler.SetWebhookService(webhookService)
 	userHandler.SetOAuthRepo(oauthRepo, appRepo)
@@ -147,14 +164,14 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 	sdkHandler.SetSDKExternalIdentityRepo(sdkExternalRepo)
 	sdkHandler.SetRiskEventRepository(riskEventRepo)
 	sdkHandler.SetWebhookService(webhookService)
-	sseHandler := handler.NewSSEHandler()
+	sseHandler := handler.NewSSEHandler(appRepo)
 	configHandler := handler.NewConfigHandler(configRepo, cfg)
 	configHandler.SetCachedConfigRepo(cachedConfigRepo)
 	webhookHandler := handler.NewWebhookHandler(webhookService)
-	oidcHandler := handler.NewOIDCHandler(cfg.JWT.Issuer)
+	oidcHandler := handler.NewOIDCHandler(cfg.JWT.Issuer, jwtManager)
 	oidcHandler.SetCache(cacheInstance)
 	deviceHandler := handler.NewDeviceHandler(deviceCodeRepo, appRepo, baseURL, frontendURL)
-	oidcHandler.SetOAuthRepo(oauthRepo, jwtManager) // 设置OAuth仓库用于token撤销
+	oidcHandler.SetOAuthRepo(oauthRepo)
 	oidcHandler.SetApplicationRepo(appRepo)
 	avatarHandler := handler.NewAvatarHandler(userRepo, "./uploads/avatars", "/avatars")
 	systemConfigHandler := handler.NewSystemConfigHandler(cfg)
@@ -244,14 +261,21 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 		}
 	}
 	r.GET("/.well-known/openid-configuration", oidcHandler.Discovery)
+	r.GET("/.well-known/oauth-authorization-server", oidcHandler.OAuthAuthorizationServerMetadata)
 	r.GET("/.well-known/jwks.json", oidcHandler.JWKS)
 	r.GET("/.well-known/webfinger", oidcHandler.WebFinger)
+	r.GET("/saml/idp/metadata", samlIDPHandler.Metadata)
+	r.GET("/saml/idp/sso", samlIDPHandler.SSO)
+	r.POST("/saml/idp/sso", samlIDPHandler.SSO)
+	r.GET("/saml/idp/slo", samlIDPHandler.SLO)
+	r.POST("/saml/idp/slo", samlIDPHandler.SLO)
 	oauth := r.Group("/oauth")
 	oauth.Use(middleware.AuthRateLimiter()) /* OAuth 端点限流：防止暴力破解 token/introspect */
 	{
 		oauth.POST("/token", oauthHandler.Token)
 		oauth.POST("/revoke", oauthHandler.Revoke)
 		oauth.GET("/userinfo", oauthHandler.UserInfo)
+		oauth.POST("/userinfo", oauthHandler.UserInfo)
 		oauth.POST("/introspect", oauthHandler.Introspect) // Token introspection
 		oauth.GET("/logout", oidcHandler.Logout)           // OIDC logout
 		oauth.POST("/logout", oidcHandler.Logout)
@@ -262,6 +286,7 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 		}
 	}
 	oauthAPI := r.Group("/api/oauth")
+	oauthAPI.Use(middleware.StrictRateLimiter())
 	{
 		oauthAPI.GET("/app-info", oauthHandler.GetAppInfo)
 		// Device Flow info (public)
@@ -318,6 +343,9 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 			apps.POST("/:id/reset-secret", appHandler.ResetSecret)
 			apps.GET("/:id/stats", appHandler.GetAppStats)
 			apps.GET("/:id/users", appHandler.GetAuthorizedUsers)
+			apps.GET("/:id/saml-idp", samlIDPHandler.GetAppConfig)
+			apps.POST("/:id/saml-idp", samlIDPHandler.UpdateAppConfig)
+			apps.POST("/:id/saml-idp/delete", samlIDPHandler.DeleteAppConfig)
 
 			// Webhook routes
 			apps.GET("/:id/webhooks", webhookHandler.ListWebhooks)
@@ -450,9 +478,10 @@ func Setup(cfg *config.Config, cacheInstance cache.Cache) (*gin.Engine, *service
 
 	/* SSE 事件流 - 使用 Cookie 鉴权（EventSource 自动携带 Cookie，无需查询字符串传递 token） */
 	events := r.Group("/api/events")
+	events.Use(middleware.AuthWithOAuthRepo(jwtManager, oauthRepo, tokenBlacklist))
 	{
 		events.GET("/app", sseHandler.StreamApp)
-		events.GET("/stream", middleware.AuthWithOAuthRepo(jwtManager, oauthRepo, tokenBlacklist), sseHandler.Stream)
+		events.GET("/stream", sseHandler.Stream)
 	}
 
 	// Avatar file serving

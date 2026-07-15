@@ -4,8 +4,10 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const NEXT_TYPES = path.resolve(ROOT, '.next/types');
+const NEXT_DEV_TYPES = path.resolve(ROOT, '.next/dev/types');
 
 fs.rmSync(NEXT_TYPES, { recursive: true, force: true });
+fs.rmSync(NEXT_DEV_TYPES, { recursive: true, force: true });
 
 const executable = process.platform === 'win32' ? 'bun.exe' : 'bun';
 const result = spawnSync(executable, ['x', 'tsc', '--noEmit'], {

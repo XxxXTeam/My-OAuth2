@@ -11,12 +11,12 @@ func TestApplication_ValidateRedirectURI_ExactMatch(t *testing.T) {
 	}
 }
 
-func TestApplication_ValidateRedirectURI_AllowsSameOriginSubpath(t *testing.T) {
+func TestApplication_ValidateRedirectURI_RejectsSameOriginSubpath(t *testing.T) {
 	app := &Application{}
 	app.SetRedirectURIs([]string{"http://localhost:9000/callback"})
 
-	if !app.ValidateRedirectURI("http://localhost:9000/sso/callback") {
-		t.Fatal("expected same-origin subpath redirect_uri to be allowed")
+	if app.ValidateRedirectURI("http://localhost:9000/sso/callback") {
+		t.Fatal("expected same-origin subpath redirect_uri to be rejected")
 	}
 }
 
@@ -45,5 +45,24 @@ func TestApplication_ValidateRedirectURI_RejectsUnsafeURI(t *testing.T) {
 		if app.ValidateRedirectURI(uri) {
 			t.Fatalf("expected unsafe redirect_uri %q to be rejected", uri)
 		}
+	}
+}
+
+func TestApplication_ValidatePostLogoutRedirectURI_ExactMatch(t *testing.T) {
+	app := &Application{}
+	app.SetPostLogoutRedirectURIs([]string{"http://localhost:9000/logout-callback"})
+
+	if !app.ValidatePostLogoutRedirectURI("http://localhost:9000/logout-callback") {
+		t.Fatal("expected exact post_logout_redirect_uri match")
+	}
+}
+
+func TestApplication_ValidatePostLogoutRedirectURI_RejectsOAuthRedirectURI(t *testing.T) {
+	app := &Application{}
+	app.SetRedirectURIs([]string{"http://localhost:9000/callback"})
+	app.SetPostLogoutRedirectURIs([]string{"http://localhost:9000/logout-callback"})
+
+	if app.ValidatePostLogoutRedirectURI("http://localhost:9000/callback") {
+		t.Fatal("expected OAuth redirect_uri to be rejected as post_logout_redirect_uri")
 	}
 }

@@ -2,7 +2,6 @@ package model
 
 import (
 	"encoding/json"
-	"net/url"
 	"strings"
 	"time"
 
@@ -49,16 +48,17 @@ const (
  * 索引：client_id(唯一), user_id
  */
 type Application struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	ClientID     string    `gorm:"uniqueIndex;size:100;not null" json:"client_id"`
-	ClientSecret string    `gorm:"size:255;not null" json:"-"`
-	Name         string    `gorm:"size:200;not null" json:"name"`
-	Description  string    `gorm:"type:text" json:"description,omitempty"`
-	RedirectURIs string    `gorm:"type:text;not null" json:"-"` // JSON array stored as string
-	Scopes       string    `gorm:"type:text" json:"-"`          // JSON array stored as string
-	UserID       uuid.UUID `gorm:"type:uuid;index" json:"user_id"`
-	CreatedAt    time.Time `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt    time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+	ID                     uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	ClientID               string    `gorm:"uniqueIndex;size:100;not null" json:"client_id"`
+	ClientSecret           string    `gorm:"size:255;not null" json:"-"`
+	Name                   string    `gorm:"size:200;not null" json:"name"`
+	Description            string    `gorm:"type:text" json:"description,omitempty"`
+	RedirectURIs           string    `gorm:"type:text;not null" json:"-"` // JSON array stored as string
+	PostLogoutRedirectURIs string    `gorm:"type:text" json:"-"`
+	Scopes                 string    `gorm:"type:text" json:"-"` // JSON array stored as string
+	UserID                 uuid.UUID `gorm:"type:uuid;index" json:"user_id"`
+	CreatedAt              time.Time `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt              time.Time `gorm:"autoUpdateTime" json:"updated_at"`
 
 	// OAuth2 Client Configuration
 	AppType                 ApplicationType         `gorm:"size:20;default:confidential" json:"app_type"`
@@ -105,6 +105,34 @@ func (a *Application) SetRedirectURIs(uris []string) {
 	a.RedirectURIs = string(data)
 }
 
+/* GetPostLogoutRedirectURIs 解析 OIDC RP-Initiated Logout 回跳地址列表 */
+func (a *Application) GetPostLogoutRedirectURIs() []string {
+	var uris []string
+	if a.PostLogoutRedirectURIs != "" {
+		json.Unmarshal([]byte(a.PostLogoutRedirectURIs), &uris)
+	}
+	return uris
+}
+
+/* SetPostLogoutRedirectURIs 将 OIDC 登出回跳地址列表序列化为 JSON 存储 */
+func (a *Application) SetPostLogoutRedirectURIs(uris []string) {
+	data, _ := json.Marshal(uris)
+	a.PostLogoutRedirectURIs = string(data)
+}
+
+/* ValidatePostLogoutRedirectURI 校验 OIDC 登出回跳地址是否精确登记 */
+func (a *Application) ValidatePostLogoutRedirectURI(uri string) bool {
+	if !isSafeRegisteredURI(uri) {
+		return false
+	}
+	for _, allowed := range a.GetPostLogoutRedirectURIs() {
+		if allowed == uri {
+			return true
+		}
+	}
+	return false
+}
+
 /*
  * GetScopes 解析 JSON 数组格式的权限范围列表
  * @return []string - 应用支持的 scope 列表
@@ -126,55 +154,25 @@ func (a *Application) SetScopes(scopes []string) {
 	a.Scopes = string(data)
 }
 
-/*
- * redirectURIOrigin 提取回调地址的 origin（scheme + host[:port]）
- */
-func redirectURIOrigin(uri string) (string, bool) {
-	parsed, err := url.Parse(uri)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", false
-	}
-	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), true
+/* isSafeRegisteredURI 执行 OAuth/OIDC 回跳地址基础安全校验 */
+func isSafeRegisteredURI(uri string) bool {
+	lower := strings.ToLower(uri)
+	return uri != "" &&
+		!strings.HasPrefix(lower, "javascript:") &&
+		!strings.HasPrefix(lower, "data:") &&
+		!strings.HasPrefix(lower, "vbscript:") &&
+		!strings.Contains(uri, "/../") &&
+		!strings.Contains(uri, "/..\\") &&
+		!strings.Contains(uri, "@")
 }
 
-/*
- * ValidateRedirectURI 校验回调地址是否在允许列表中
- * 功能：精确匹配 + 同 origin 子路径放行 + 安全校验，阻止开放重定向攻击
- *       - 精确匹配已登记的 redirect_uri
- *       - 若已登记同一 origin 的任一 redirect_uri，则允许该 origin 下其他路径
- *         （便于业务系统 SSO 接入使用独立回调路径，如 /sso/callback）
- *       - 禁止 javascript:/data: 等危险协议
- *       - 禁止路径穿越（/../）
- *       - 禁止带用户信息的 URI（user@host）
- * @param uri  - 待校验的回调 URI
- * @return bool - 在允许列表中返回 true
- */
+/* ValidateRedirectURI 校验 OAuth redirect_uri 是否精确登记 */
 func (a *Application) ValidateRedirectURI(uri string) bool {
-	/* 基础安全检查：阻止危险协议和路径穿越 */
-	lower := strings.ToLower(uri)
-	if strings.HasPrefix(lower, "javascript:") ||
-		strings.HasPrefix(lower, "data:") ||
-		strings.HasPrefix(lower, "vbscript:") ||
-		strings.Contains(uri, "/../") ||
-		strings.Contains(uri, "/..\\") ||
-		strings.Contains(uri, "@") {
+	if !isSafeRegisteredURI(uri) {
 		return false
 	}
-
-	allowedURIs := a.GetRedirectURIs()
-	for _, allowed := range allowedURIs {
+	for _, allowed := range a.GetRedirectURIs() {
 		if allowed == uri {
-			return true
-		}
-	}
-
-	requestedOrigin, ok := redirectURIOrigin(uri)
-	if !ok {
-		return false
-	}
-	for _, allowed := range allowedURIs {
-		allowedOrigin, ok := redirectURIOrigin(allowed)
-		if ok && allowedOrigin == requestedOrigin {
 			return true
 		}
 	}
@@ -238,11 +236,12 @@ func (a *Application) SupportsGrantType(grantType string) bool {
 
 /* userCentricScopes 仅适用于终端用户授权（授权码/设备流等），禁止 client_credentials */
 var userCentricScopes = map[string]struct{}{
-	"openid": {}, "profile": {}, "email": {}, "phone": {}, "address": {}, "offline_access": {},
+	"openid": {}, "profile": {}, "email": {}, "phone": {}, "address": {}, "groups": {}, "offline_access": {},
 }
 
 func DefaultUserAuthorizationScopes() []string {
-	return []string{"openid", "profile", "email", "phone", "address", "offline_access"}
+	/* groups：返回用户所属组/角色（UserInfo groups claim），属于用户 scope */
+	return []string{"openid", "profile", "email", "phone", "address", "groups", "offline_access"}
 }
 
 /* DefaultMachineScopes client_credentials 默认可申请的机器 scope */
@@ -293,7 +292,7 @@ func (a *Application) GetOIDCScopes() []string {
 }
 
 /* userScopeDisplayOrder 授权页展示顺序（不含 openid） */
-var userScopeDisplayOrder = []string{"profile", "email", "phone", "address", "offline_access"}
+var userScopeDisplayOrder = []string{"profile", "email", "phone", "address", "groups", "offline_access"}
 
 /* AuthorizeScopeBreakdown 解析授权请求中的 scope */
 type AuthorizeScopeBreakdown struct {
@@ -382,29 +381,12 @@ func orderUserScopesForDisplay(effective []string) []string {
  * GetResponseTypesSupported 根据 grant_types 推导 OAuth response_types（RFC 6749）
  */
 func (a *Application) GetResponseTypesSupported() []string {
-	var out []string
-	add := func(v string) {
-		for _, existing := range out {
-			if existing == v {
-				return
-			}
-		}
-		out = append(out, v)
-	}
 	for _, gt := range a.GetGrantTypes() {
-		switch normalizeGrantType(gt) {
-		case "authorization_code":
-			add("code")
+		if normalizeGrantType(gt) == "authorization_code" {
+			return []string{"code"}
 		}
 	}
-	if a.HasOIDCScope() {
-		add("id_token")
-		add("code id_token")
-	}
-	if len(out) == 0 {
-		return []string{"code"}
-	}
-	return out
+	return []string{"code"}
 }
 
 /* HasOIDCScope 应用是否配置 openid（可签发 id_token） */

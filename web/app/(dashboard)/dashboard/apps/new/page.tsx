@@ -19,6 +19,7 @@ export default function NewAppPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [redirectUris, setRedirectUris] = useState<string[]>(['']);
+  const [postLogoutRedirectUris, setPostLogoutRedirectUris] = useState<string[]>(['']);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [grantTypes, setGrantTypes] = useState<string[]>(['authorization_code', 'refresh_token']);
@@ -47,11 +48,28 @@ export default function NewAppPage() {
     setRedirectUris(newUris);
   };
 
+  const handleAddPostLogoutUri = () => {
+    setPostLogoutRedirectUris([...postLogoutRedirectUris, '']);
+  };
+
+  const handleRemovePostLogoutUri = (index: number) => {
+    if (postLogoutRedirectUris.length > 1) {
+      setPostLogoutRedirectUris(postLogoutRedirectUris.filter((_, i) => i !== index));
+    }
+  };
+
+  const handlePostLogoutUriChange = (index: number, value: string) => {
+    const newUris = [...postLogoutRedirectUris];
+    newUris[index] = value;
+    setPostLogoutRedirectUris(newUris);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
     const validUris = redirectUris.filter(uri => uri.trim() !== '');
+    const validPostLogoutUris = postLogoutRedirectUris.filter(uri => uri.trim() !== '');
     if (validUris.length === 0) {
       setError(t('apps.create.redirectUrisHelp'));
       return;
@@ -66,6 +84,7 @@ export default function NewAppPage() {
       name,
       description,
       redirect_uris: validUris,
+      post_logout_redirect_uris: validPostLogoutUris,
       scopes: scopeList,
       allowed_scopes: allowedList,
       grant_types: grantTypes,
@@ -175,6 +194,49 @@ export default function NewAppPage() {
                   variant="outline"
                   size="sm"
                   onClick={handleAddUri}
+                  disabled={isLoading}
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  {t('common.add')}
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>{t('apps.create.postLogoutRedirectUris')}</Label>
+              <p className="text-sm text-muted-foreground">
+                {t('apps.create.postLogoutRedirectUrisHelp')}
+              </p>
+              <div className="space-y-2">
+                {postLogoutRedirectUris.map((uri, index) => (
+                  <div key={index} className="flex gap-2">
+                    <Input
+                      type="url"
+                      placeholder="https://example.com/logout-callback"
+                      value={uri}
+                      onChange={(e) => handlePostLogoutUriChange(index, e.target.value)}
+                      disabled={isLoading}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                    {postLogoutRedirectUris.length > 1 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => handleRemovePostLogoutUri(index)}
+                        disabled={isLoading}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAddPostLogoutUri}
                   disabled={isLoading}
                 >
                   <Plus className="mr-2 h-4 w-4" />

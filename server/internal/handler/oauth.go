@@ -162,6 +162,7 @@ func (h *OAuthHandler) GetAppInfo(c *gin.Context) {
 			"scopes":                     app.GetUserAuthorizationScopes(),
 			"allowed_scopes":             app.GetAllowedScopes(),
 			"grant_types":                app.GetGrantTypes(),
+			"post_logout_redirect_uris":  app.GetPostLogoutRedirectURIs(),
 			"response_types_supported":   app.GetResponseTypesSupported(),
 			"app_type":                   app.AppType,
 			"token_endpoint_auth_method": app.TokenEndpointAuthMethod,
@@ -574,6 +575,7 @@ func (h *OAuthHandler) Revoke(c *gin.Context) {
  *   - email: email, email_verified
  *   - phone: phone_number, phone_number_verified
  *   - address: address
+ *   - groups: groups（用户所属组/角色）
  * GET /oauth/userinfo
  */
 func (h *OAuthHandler) UserInfo(c *gin.Context) {
@@ -682,6 +684,11 @@ func (h *OAuthHandler) UserInfo(c *gin.Context) {
 	/* address scope */
 	if scopeSet["address"] {
 		response["address"] = user.GetAddress()
+	}
+
+	/* groups scope: 返回用户所属组/角色，来源于 User.Role（admin/user） */
+	if scopeSet["groups"] {
+		response["groups"] = []string{string(user.Role)}
 	}
 
 	c.JSON(http.StatusOK, response)

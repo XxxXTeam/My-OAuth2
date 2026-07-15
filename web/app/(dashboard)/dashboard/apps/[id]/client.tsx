@@ -8,25 +8,37 @@ import { useI18n } from '@/lib/i18n';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ArrowLeft, Copy, Check, Loader2, Eye, EyeOff, AlertTriangle, RefreshCw, Save, Plus, X, Pencil, Users } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { ArrowLeft, Copy, Check, Loader2, Eye, EyeOff, AlertTriangle, RefreshCw, Save, Plus, X, Pencil, Users, Info, ChevronDown, KeyRound, ShieldCheck } from 'lucide-react';
 import { WebhookManager } from '@/components/webhook-manager';
-import type { Application, AuthUserSummary, UserAuthorization } from '@/lib/types';
+import type { Application, AuthUserSummary, SAMLIdPServiceProviderConfig, UserAuthorization } from '@/lib/types';
+
+/** Scope 与 UserInfo / ID Token Claim 的映射关系，用于开发者对接指引展示 */
+const SCOPE_CLAIM_MAP: Array<{ scope: string; claims: string[] }> = [
+  { scope: 'openid', claims: ['sub'] },
+  { scope: 'profile', claims: ['name', 'preferred_username', 'nickname', 'given_name', 'family_name', 'picture', 'website', 'gender', 'birthdate', 'zoneinfo', 'locale', 'updated_at'] },
+  { scope: 'email', claims: ['email', 'email_verified'] },
+  { scope: 'phone', claims: ['phone_number', 'phone_number_verified'] },
+  { scope: 'address', claims: ['address'] },
+];
 
 function AppDetailContent() {
   const params = useParams();
   const searchParams = useSearchParams();
   const { t, dateLocale } = useI18n();
   const isNew = searchParams.get('new') === 'true';
-  
+
   // For static export, get ID from URL path instead of useParams
   // useParams returns '_placeholder_' in static export
   const [appId, setAppId] = useState<string | null>(null);
   const [app, setApp] = useState<Application | null>(null);
-  
+
   useEffect(() => {
     // Extract actual ID from URL path
-    const pathParts = window.location.pathname.split('/');
+    const pathParts = window.location.pathname.split('/').filter(Boolean);
     const idFromPath = pathParts[pathParts.length - 1];
     if (idFromPath && idFromPath !== '_placeholder_') {
       setAppId(idFromPath);
@@ -40,13 +52,26 @@ function AppDetailContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [showSecret, setShowSecret] = useState(isNew);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [showScopeMap, setShowScopeMap] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [samlIdPConfig, setSamlIdPConfig] = useState<SAMLIdPServiceProviderConfig | null>(null);
+  const [isEditingSAMLIdP, setIsEditingSAMLIdP] = useState(false);
+  const [isSavingSAMLIdP, setIsSavingSAMLIdP] = useState(false);
+  const [samlIdPForm, setSamlIdPForm] = useState({
+    sp_entity_id: '',
+    acs_url: '',
+    certificate_pem: '',
+    name_id_format: 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent',
+    attribute_mappings: '{\n  "email": "email",\n  "username": "username",\n  "displayName": "displayName"\n}',
+    enabled: true,
+  });
   const [editForm, setEditForm] = useState({
     name: '',
     description: '',
     redirect_uris: [''],
+    post_logout_redirect_uris: [''],
     scopes: 'openid profile email phone address',
     allowed_scopes: 'api.read api.write',
     grant_types: ['authorization_code', 'refresh_token'],
@@ -55,7 +80,7 @@ function AppDetailContent() {
 
   const loadApp = useCallback(async () => {
     if (!appId) return;
-    
+
     const response = await api.getApp(appId);
     if (response.success && response.data) {
       const storedSecret = sessionStorage.getItem(`app_secret_${appId}`);
@@ -64,7 +89,7 @@ function AppDetailContent() {
         sessionStorage.removeItem(`app_secret_${appId}`);
       }
       setApp(response.data);
-      
+
       const statsResponse = await api.getAppStats(appId);
       if (statsResponse.success && statsResponse.data) {
         setStats(statsResponse.data);
@@ -74,6 +99,23 @@ function AppDetailContent() {
       if (usersResponse.success && usersResponse.data) {
         setAuthorizedUsers(usersResponse.data.authorizations || []);
         setAuthorizedUsersTotal(usersResponse.data.total || 0);
+      }
+
+      const samlResponse = await api.getAppSAMLIdPConfig(appId);
+      if (samlResponse.success && samlResponse.data) {
+        setSamlIdPConfig(samlResponse.data);
+        setSamlIdPForm({
+          sp_entity_id: samlResponse.data.sp_entity_id || '',
+          acs_url: samlResponse.data.acs_url || '',
+          certificate_pem: '',
+          name_id_format: samlResponse.data.name_id_format || 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent',
+          attribute_mappings: JSON.stringify(samlResponse.data.attribute_mappings || {
+            email: 'email',
+            username: 'username',
+            displayName: 'displayName',
+          }, null, 2),
+          enabled: samlResponse.data.enabled,
+        });
       }
     }
     setIsLoading(false);
@@ -93,7 +135,7 @@ function AppDetailContent() {
 
   const handleResetSecret = async () => {
     if (!app || !confirm(t('apps.resetSecretConfirm'))) return;
-    
+
     setIsResetting(true);
     const response = await api.resetAppSecret(app.id);
     if (response.success && response.data) {
@@ -113,6 +155,7 @@ function AppDetailContent() {
       name: app.name,
       description: app.description || '',
       redirect_uris: app.redirect_uris.length > 0 ? [...app.redirect_uris] : [''],
+      post_logout_redirect_uris: app.post_logout_redirect_uris && app.post_logout_redirect_uris.length > 0 ? [...app.post_logout_redirect_uris] : [''],
       scopes: Array.isArray(app.scopes) && app.scopes.length > 0 ? app.scopes.join(' ') : 'openid profile email phone address',
       allowed_scopes: Array.isArray(app.allowed_scopes) && app.allowed_scopes.length > 0 ? app.allowed_scopes.join(' ') : 'api.read api.write',
       grant_types: Array.isArray(app.grant_types) && app.grant_types.length > 0 ? [...app.grant_types] : ['authorization_code', 'refresh_token'],
@@ -126,6 +169,7 @@ function AppDetailContent() {
       name: '',
       description: '',
       redirect_uris: [''],
+      post_logout_redirect_uris: [''],
       scopes: 'openid profile email phone address',
       allowed_scopes: 'api.read api.write',
       grant_types: ['authorization_code', 'refresh_token'],
@@ -151,10 +195,30 @@ function AppDetailContent() {
     setEditForm({ ...editForm, redirect_uris: newUris });
   };
 
+  const handleAddPostLogoutUri = () => {
+    setEditForm({ ...editForm, post_logout_redirect_uris: [...editForm.post_logout_redirect_uris, ''] });
+  };
+
+  const handleRemovePostLogoutUri = (index: number) => {
+    if (editForm.post_logout_redirect_uris.length > 1) {
+      setEditForm({
+        ...editForm,
+        post_logout_redirect_uris: editForm.post_logout_redirect_uris.filter((_, i) => i !== index),
+      });
+    }
+  };
+
+  const handlePostLogoutUriChange = (index: number, value: string) => {
+    const newUris = [...editForm.post_logout_redirect_uris];
+    newUris[index] = value;
+    setEditForm({ ...editForm, post_logout_redirect_uris: newUris });
+  };
+
   const handleSave = async () => {
     if (!app) return;
-    
+
     const validUris = editForm.redirect_uris.filter(uri => uri.trim() !== '');
+    const validPostLogoutUris = editForm.post_logout_redirect_uris.filter(uri => uri.trim() !== '');
     if (validUris.length === 0) {
       setMessage({ type: 'error', text: t('apps.detail.atLeastOneUri') });
       return;
@@ -168,6 +232,7 @@ function AppDetailContent() {
       name: editForm.name,
       description: editForm.description,
       redirect_uris: validUris,
+      post_logout_redirect_uris: validPostLogoutUris,
       scopes: scopeList,
       allowed_scopes: allowedList,
       grant_types: editForm.grant_types,
@@ -181,6 +246,64 @@ function AppDetailContent() {
       setMessage({ type: 'error', text: response.error?.message || t('toast.error') });
     }
     setIsSaving(false);
+    setTimeout(() => setMessage(null), 3000);
+  };
+
+  const cancelSAMLIdPEditing = () => {
+    if (samlIdPConfig) {
+      setSamlIdPForm({
+        sp_entity_id: samlIdPConfig.sp_entity_id || '',
+        acs_url: samlIdPConfig.acs_url || '',
+        certificate_pem: '',
+        name_id_format: samlIdPConfig.name_id_format || 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent',
+        attribute_mappings: JSON.stringify(samlIdPConfig.attribute_mappings || {
+          email: 'email',
+          username: 'username',
+          displayName: 'displayName',
+        }, null, 2),
+        enabled: samlIdPConfig.enabled,
+      });
+    }
+    setIsEditingSAMLIdP(false);
+  };
+
+  const handleSaveSAMLIdP = async () => {
+    if (!app) return;
+    let mappings: Record<string, string>;
+    try {
+      mappings = JSON.parse(samlIdPForm.attribute_mappings || '{}');
+    } catch {
+      setMessage({ type: 'error', text: t('apps.detail.samlIdpInvalidMappings') });
+      setTimeout(() => setMessage(null), 3000);
+      return;
+    }
+
+    setIsSavingSAMLIdP(true);
+    const response = await api.updateAppSAMLIdPConfig(app.id, {
+      sp_entity_id: samlIdPForm.sp_entity_id,
+      acs_url: samlIdPForm.acs_url,
+      certificate_pem: samlIdPForm.certificate_pem.trim() || undefined,
+      name_id_format: samlIdPForm.name_id_format,
+      attribute_mappings: mappings,
+      enabled: samlIdPForm.enabled,
+    });
+
+    if (response.success && response.data) {
+      setSamlIdPConfig(response.data);
+      setSamlIdPForm({
+        sp_entity_id: response.data.sp_entity_id || '',
+        acs_url: response.data.acs_url || '',
+        certificate_pem: '',
+        name_id_format: response.data.name_id_format,
+        attribute_mappings: JSON.stringify(response.data.attribute_mappings || {}, null, 2),
+        enabled: response.data.enabled,
+      });
+      setIsEditingSAMLIdP(false);
+      setMessage({ type: 'success', text: t('toast.saved') });
+    } else {
+      setMessage({ type: 'error', text: response.error?.message || t('toast.error') });
+    }
+    setIsSavingSAMLIdP(false);
     setTimeout(() => setMessage(null), 3000);
   };
 
@@ -227,8 +350,8 @@ function AppDetailContent() {
       {/* Message */}
       {message && (
         <div className={`p-4 rounded-md ${
-          message.type === 'success' 
-            ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400' 
+          message.type === 'success'
+            ? 'bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400'
             : 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400'
         }`}>
           {message.text}
@@ -600,6 +723,28 @@ function AppDetailContent() {
                   {t('common.add')}
                 </Button>
               </div>
+              <div className="space-y-2 pt-4 border-t">
+                <Label className="text-xs text-muted-foreground">{t('apps.detail.postLogoutRedirectUris')}</Label>
+                {(editForm.post_logout_redirect_uris || ['']).map((uri, index) => (
+                  <div key={index} className="flex gap-2">
+                    <Input
+                      value={uri}
+                      onChange={(e) => handlePostLogoutUriChange(index, e.target.value)}
+                      placeholder="https://example.com/logout-callback"
+                      className="font-mono text-sm"
+                    />
+                    {editForm.post_logout_redirect_uris.length > 1 && (
+                      <Button variant="outline" size="icon" onClick={() => handleRemovePostLogoutUri(index)}>
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" onClick={handleAddPostLogoutUri}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  {t('common.add')}
+                </Button>
+              </div>
               <div className="flex gap-2 pt-2 border-t mt-4">
                 <Button size="sm" onClick={handleSave} disabled={isSaving}>
                   {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
@@ -611,17 +756,33 @@ function AppDetailContent() {
               </div>
             </div>
           ) : (
-            <div className="space-y-2">
-              {app.redirect_uris.length > 0 ? app.redirect_uris.map((uri, index) => (
-                <div key={index} className="flex gap-2">
-                  <Input value={uri} readOnly className="font-mono text-sm bg-slate-50" />
-                  <Button variant="outline" size="icon" onClick={() => copyToClipboard(uri, `uri_${index}`)}>
-                    {copiedField === `uri_${index}` ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-                  </Button>
-                </div>
-              )) : (
-                <p className="text-muted-foreground text-sm">{t('apps.detail.noRedirectUris')}</p>
-              )}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">{t('apps.detail.redirectUris')}</p>
+                {app.redirect_uris.length > 0 ? app.redirect_uris.map((uri, index) => (
+                  <div key={index} className="flex gap-2">
+                    <Input value={uri} readOnly className="font-mono text-sm bg-slate-50" />
+                    <Button variant="outline" size="icon" onClick={() => copyToClipboard(uri, `uri_${index}`)}>
+                      {copiedField === `uri_${index}` ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                )) : (
+                  <p className="text-muted-foreground text-sm">{t('apps.detail.noRedirectUris')}</p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">{t('apps.detail.postLogoutRedirectUris')}</p>
+                {(app.post_logout_redirect_uris || []).length > 0 ? app.post_logout_redirect_uris!.map((uri, index) => (
+                  <div key={index} className="flex gap-2">
+                    <Input value={uri} readOnly className="font-mono text-sm bg-slate-50" />
+                    <Button variant="outline" size="icon" onClick={() => copyToClipboard(uri, `post_logout_uri_${index}`)}>
+                      {copiedField === `post_logout_uri_${index}` ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                )) : (
+                  <p className="text-muted-foreground text-sm">{t('apps.detail.noPostLogoutRedirectUris')}</p>
+                )}
+              </div>
             </div>
           )}
         </CardContent>
@@ -634,18 +795,277 @@ function AppDetailContent() {
           <CardDescription>{t('apps.detail.endpointsDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {[
+            ['discoveryUrl', '/.well-known/openid-configuration'],
+            ['oauthMetadataUrl', '/.well-known/oauth-authorization-server'],
+            ['jwksUrl', '/.well-known/jwks.json'],
+            ['authUrl', '/oauth/authorize'],
+            ['tokenUrl', '/oauth/token'],
+            ['userInfoUrl', '/oauth/userinfo'],
+            ['revokeUrl', '/oauth/revoke'],
+            ['introspectUrl', '/oauth/introspect'],
+            ['logoutUrl', '/oauth/logout'],
+            ['deviceUrl', '/oauth/device/code'],
+            ['samlIdpMetadataUrl', '/saml/idp/metadata'],
+            ['samlIdpSsoUrl', '/saml/idp/sso'],
+            ['samlIdpSloUrl', '/saml/idp/slo'],
+          ].map(([labelKey, path]) => {
+            const value = `${typeof window !== 'undefined' ? window.location.origin : ''}${path}`;
+            return (
+              <div key={path} className="space-y-2">
+                <Label>{t(`apps.detail.${labelKey}`)}</Label>
+                <div className="flex gap-2">
+                  <Input value={value} readOnly className="font-mono text-sm" />
+                  <Button variant="outline" size="icon" onClick={() => copyToClipboard(value, `endpoint_${labelKey}`)}>
+                    {copiedField === `endpoint_${labelKey}` ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </CardContent>
+      </Card>
+
+      {/* Developer Integration Guide —— 开发者对接指引 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <KeyRound className="h-5 w-5" />
+            {t('apps.detail.devGuide')}
+          </CardTitle>
+          <CardDescription>{t('apps.detail.devGuideDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {/* Issuer URL —— 单独一行展示 iss */}
           <div className="space-y-2">
-            <Label>{t('apps.detail.authUrl')}</Label>
-            <Input value={`${typeof window !== 'undefined' ? window.location.origin : ''}/oauth/authorize`} readOnly className="font-mono text-sm" />
+            <div className="flex items-center gap-1.5">
+              <Label>{t('apps.detail.issuer')}</Label>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Info className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs">
+                    {t('apps.detail.issuerHint')}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            {(() => {
+              const issuer = typeof window !== 'undefined' ? window.location.origin : '';
+              return (
+                <div className="flex gap-2">
+                  <Input value={issuer} readOnly className="font-mono text-sm" />
+                  <Button variant="outline" size="icon" onClick={() => copyToClipboard(issuer, 'issuer')}>
+                    {copiedField === 'issuer' ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              );
+            })()}
           </div>
+
+          {/* ID Token 签名算法说明 */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm text-muted-foreground">{t('apps.detail.idTokenAlg')}:</span>
+              <Badge variant="info" className="font-mono">{t('apps.detail.idTokenAlgValue')}</Badge>
+            </div>
+            <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+              <ShieldCheck className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              {t('apps.detail.idTokenAlgHint')}
+            </p>
+          </div>
+
+          {/* Scope → Claim 映射（可折叠） */}
           <div className="space-y-2">
-            <Label>{t('apps.detail.tokenUrl')}</Label>
-            <Input value={`${typeof window !== 'undefined' ? window.location.origin : ''}/oauth/token`} readOnly className="font-mono text-sm" />
+            <button
+              type="button"
+              onClick={() => setShowScopeMap((v) => !v)}
+              className="flex items-center gap-2 text-sm font-medium hover:text-primary transition-colors"
+            >
+              <ChevronDown className={`h-4 w-4 transition-transform ${showScopeMap ? 'rotate-0' : '-rotate-90'}`} />
+              {t('apps.detail.scopeClaimTitle')}
+            </button>
+            <p className="text-xs text-muted-foreground">{t('apps.detail.scopeClaimHint')}</p>
+            {showScopeMap && (
+              <div className="overflow-x-auto rounded-md border">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/50 text-left text-muted-foreground">
+                      <th className="px-3 py-2 font-medium">{t('apps.detail.colScopeName')}</th>
+                      <th className="px-3 py-2 font-medium">{t('apps.detail.colClaims')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {SCOPE_CLAIM_MAP.map(({ scope, claims }) => (
+                      <tr key={scope} className="border-b last:border-0 align-top">
+                        <td className="px-3 py-2">
+                          <span className="px-1.5 py-0.5 rounded bg-primary/10 border text-xs font-mono">{scope}</span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-wrap gap-1">
+                            {claims.map((c) => (
+                              <span key={c} className="px-1.5 py-0.5 rounded bg-muted text-xs font-mono">{c}</span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-          <div className="space-y-2">
-            <Label>{t('apps.detail.userInfoUrl')}</Label>
-            <Input value={`${typeof window !== 'undefined' ? window.location.origin : ''}/oauth/userinfo`} readOnly className="font-mono text-sm" />
+
+          {/* PKCE 提示 —— 仅公开客户端展示 */}
+          {app.app_type === 'public' && (
+            <div className="flex items-start gap-2 rounded-md border border-yellow-500/50 bg-yellow-50 p-3 text-sm dark:bg-yellow-900/20">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-yellow-600 dark:text-yellow-500" />
+              <div className="space-y-0.5">
+                <p className="font-medium text-yellow-700 dark:text-yellow-500">{t('apps.detail.pkceRequiredTitle')}</p>
+                <p className="text-yellow-600 dark:text-yellow-400">{t('apps.detail.pkceRequiredDesc')}</p>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* SAML IdP */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>{t('apps.detail.samlIdpTitle')}</CardTitle>
+              <CardDescription>{t('apps.detail.samlIdpDesc')}</CardDescription>
+            </div>
+            {!isEditingSAMLIdP && (
+              <Button variant="outline" size="sm" onClick={() => setIsEditingSAMLIdP(true)}>
+                <Pencil className="h-4 w-4 mr-2" />
+                {t('common.edit')}
+              </Button>
+            )}
           </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {isEditingSAMLIdP ? (
+            <div className="space-y-4">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={samlIdPForm.enabled}
+                  onChange={(e) => setSamlIdPForm({ ...samlIdPForm, enabled: e.target.checked })}
+                />
+                {t('apps.detail.samlIdpEnabled')}
+              </label>
+              <div className="space-y-2">
+                <Label>{t('apps.detail.samlIdpSpEntityId')}</Label>
+                <Input
+                  value={samlIdPForm.sp_entity_id}
+                  onChange={(e) => setSamlIdPForm({ ...samlIdPForm, sp_entity_id: e.target.value })}
+                  placeholder="https://sp.example.com/saml/metadata"
+                  className="font-mono text-sm"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('apps.detail.samlIdpAcsUrl')}</Label>
+                <Input
+                  value={samlIdPForm.acs_url}
+                  onChange={(e) => setSamlIdPForm({ ...samlIdPForm, acs_url: e.target.value })}
+                  placeholder="https://sp.example.com/saml/acs"
+                  className="font-mono text-sm"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('apps.detail.samlIdpNameIdFormat')}</Label>
+                <select
+                  value={samlIdPForm.name_id_format}
+                  onChange={(e) => setSamlIdPForm({ ...samlIdPForm, name_id_format: e.target.value })}
+                  className="w-full h-10 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                >
+                  <option value="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">urn:oasis:names:tc:SAML:2.0:nameid-format:persistent</option>
+                  <option value="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</option>
+                  <option value="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified">urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified</option>
+                  <option value="urn:oasis:names:tc:SAML:2.0:nameid-format:transient">urn:oasis:names:tc:SAML:2.0:nameid-format:transient</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label>{t('apps.detail.samlIdpCertificate')}</Label>
+                <Textarea
+                  value={samlIdPForm.certificate_pem}
+                  onChange={(e) => setSamlIdPForm({ ...samlIdPForm, certificate_pem: e.target.value })}
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  className="min-h-[120px] font-mono text-xs"
+                  spellCheck={false}
+                />
+                {samlIdPConfig?.certificate_configured && (
+                  <p className="text-xs text-muted-foreground">{t('apps.detail.samlIdpCertificateConfigured')}</p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label>{t('apps.detail.samlIdpAttributeMappings')}</Label>
+                <Textarea
+                  value={samlIdPForm.attribute_mappings}
+                  onChange={(e) => setSamlIdPForm({ ...samlIdPForm, attribute_mappings: e.target.value })}
+                  className="min-h-[130px] font-mono text-xs"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="flex gap-2 pt-2 border-t">
+                <Button size="sm" onClick={handleSaveSAMLIdP} disabled={isSavingSAMLIdP}>
+                  {isSavingSAMLIdP ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
+                  {t('common.save')}
+                </Button>
+                <Button variant="outline" size="sm" onClick={cancelSAMLIdPEditing}>
+                  {t('common.cancel')}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {samlIdPConfig?.sp_entity_id ? (
+                <>
+                  <div className="flex justify-between gap-4 text-sm">
+                    <span className="text-muted-foreground">{t('common.status')}</span>
+                    <span>{samlIdPConfig.enabled ? t('common.enabled') : t('common.disabled')}</span>
+                  </div>
+                  {[
+                    ['samlIdpSpEntityId', samlIdPConfig.sp_entity_id],
+                    ['samlIdpAcsUrl', samlIdPConfig.acs_url],
+                    ['samlIdpNameIdFormat', samlIdPConfig.name_id_format],
+                  ].map(([labelKey, value]) => (
+                    <div key={labelKey} className="space-y-2">
+                      <Label>{t(`apps.detail.${labelKey}`)}</Label>
+                      <div className="flex gap-2">
+                        <Input value={value || ''} readOnly className="font-mono text-sm" />
+                        <Button variant="outline" size="icon" onClick={() => copyToClipboard(value || '', `saml_${labelKey}`)}>
+                          {copiedField === `saml_${labelKey}` ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t('apps.detail.samlIdpNotConfigured')}</p>
+              )}
+              {[
+                ['samlIdpEntityId', samlIdPConfig?.idp_entity_id],
+                ['samlIdpMetadataUrl', samlIdPConfig?.idp_metadata_url],
+                ['samlIdpSsoUrl', samlIdPConfig?.idp_sso_url],
+              ].map(([labelKey, value]) => (
+                <div key={labelKey} className="space-y-2">
+                  <Label>{t(`apps.detail.${labelKey}`)}</Label>
+                  <div className="flex gap-2">
+                    <Input value={value || ''} readOnly className="font-mono text-sm" />
+                    <Button variant="outline" size="icon" onClick={() => copyToClipboard(value || '', `saml_${labelKey}`)} disabled={!value}>
+                      {copiedField === `saml_${labelKey}` ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
 

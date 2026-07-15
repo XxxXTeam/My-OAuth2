@@ -51,11 +51,12 @@ type LogConfig struct {
 
 /* ServerConfig HTTP 服务器配置 */
 type ServerConfig struct {
-	Host               string `json:"host"`
-	Port               int    `json:"port"`
-	Mode               string `json:"mode"` // debug, release, test
-	AllowRegistration  bool   `json:"allow_registration"`
-	ShutdownTimeoutSec int    `json:"shutdown_timeout_sec"` // 优雅关停超时秒数
+	Host               string   `json:"host"`
+	Port               int      `json:"port"`
+	Mode               string   `json:"mode"` // debug, release, test
+	AllowRegistration  bool     `json:"allow_registration"`
+	ShutdownTimeoutSec int      `json:"shutdown_timeout_sec"`  // 优雅关停超时秒数
+	TrustedProxies     []string `json:"trusted_proxies"`       // 可信代理 IP/CIDR，空数组=不信任任何代理
 }
 
 /* DatabaseConfig 数据库配置，支持 SQLite/PostgreSQL/MySQL */

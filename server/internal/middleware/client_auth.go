@@ -166,7 +166,10 @@ func (ca *ClientAuthenticator) authenticateWithJWT(c *gin.Context, assertion str
 		verifiedToken, err = ca.verifyWithJWKS(assertion, app)
 
 	default:
-		// If not configured, try HMAC first
+		// If not configured, try HMAC first (reject if client_secret is empty)
+		if app.ClientSecret == "" {
+			return nil, ErrInvalidClientAssertion
+		}
 		verifiedToken, err = jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, errors.New("unexpected signing method")
@@ -240,14 +243,16 @@ func (ca *ClientAuthenticator) validateAudience(claims jwt.MapClaims) bool {
 		return false
 	}
 
+	tokenEndpoint := strings.TrimRight(ca.issuer, "/") + "/oauth/token"
+
 	// Audience can be a string or array of strings
 	switch v := aud.(type) {
 	case string:
-		return v == ca.issuer || strings.Contains(v, "/oauth/token")
+		return v == ca.issuer || v == tokenEndpoint
 	case []interface{}:
 		for _, a := range v {
 			if s, ok := a.(string); ok {
-				if s == ca.issuer || strings.Contains(s, "/oauth/token") {
+				if s == ca.issuer || s == tokenEndpoint {
 					return true
 				}
 			}
@@ -285,7 +290,7 @@ func (ca *ClientAuthenticator) verifyWithJWKS(assertion string, app *model.Appli
 		}
 	}
 
-	// Parse and verify token
+	// Parse and verify token (restrict to asymmetric algorithms only)
 	return jwt.Parse(assertion, func(token *jwt.Token) (interface{}, error) {
 		// Get key ID from token header
 		kid, _ := token.Header["kid"].(string)
@@ -304,7 +309,7 @@ func (ca *ClientAuthenticator) verifyWithJWKS(assertion string, app *model.Appli
 			}
 		}
 		return nil, errors.New("no matching key found")
-	})
+	}, jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}))
 }
 
 // JWKSet represents a JSON Web Key Set
